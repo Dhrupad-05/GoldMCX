@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-appBg text-text font-sans antialiased;
+  font-size: 14px;
+}
+
+/* Sidebar premium maroon texture */
+.sidebar-texture {
+  background:
+    radial-gradient(800px 400px at -10% 10%, rgba(201, 154, 83, 0.16), transparent 60%),
+    radial-gradient(700px 500px at 120% 110%, rgba(0, 0, 0, 0.35), transparent 60%),
+    linear-gradient(160deg, #4a2a2c 0%, #3B1117 45%, #2C0D12 100%);
+}
+
+.hero-texture {
+  background:
+    radial-gradient(600px 260px at 85% -10%, rgba(201, 154, 83, 0.18), transparent 55%),
+    radial-gradient(500px 300px at -10% 120%, rgba(179, 56, 56, 0.12), transparent 60%),
+    linear-gradient(135deg, #662023 0%, #421517 55%, #3B1117 100%);
+}
+
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: #d9c8be;
+  border-radius: 8px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*:focus-visible {
+  outline: 2px solid #c99a53;
+  outline-offset: 1px;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-up {
+  animation: fadeUp 0.25s ease-out both;
+}
