@@ -1,0 +1,599 @@
+
+HACK IN HILLS ’26  |  PS-03
+Technical RequirementsDocument (TRD)
+Architecture, schemas, ingestion, analytics, API contracts and migration rules
+
+ | 
+Version
+ | 1.0 — Backend integration baseline
+ | 
+Date
+ | 20 October 2026
+ | 
+Status
+ | Implementation-ready draft
+ | 
+Application
+ | Existing React + TypeScript + Vite frontend
+ | 
+Backend target
+ | FastAPI + PostgreSQL modular monolith
+ | 
+Data handling
+ | Original frontend and source data files preserved
+ | 
+Primary objective
+ | Add a reliable backend without redesigning the existing UI
+ | 
+PRESERVATION RULE
+The existing UI and original data files are protected assets. Add the backend beside the frontend, read source files without modifying them, and introduce only a small API adapter for data access. Keep local demo mode available until the backend is validated.
+
+Document control
+Field
+ | Value
+ | 
+Purpose
+ | Define an implementable backend architecture and integration contract for the existing frontend.
+ | 
+Architecture style
+ | Modular monolith: FastAPI + PostgreSQL; separate source ingestion and analytics services.
+ | 
+Frontend contract
+ | Existing React visual layer and local fallback are preserved; integration through a thin API adapter.
+ | 
+Data contract
+ | Read-only source files; staged ingestion; typed normalized records; explicit provenance and quality state.
+ | 
+Analytics baseline
+ | Pair-specific robust median/MAD novelty score first; advanced models only after validation.
+ | 
+
+1. System context and constraints
+The current application is React 18 + TypeScript + Vite. It uses local TypeScript modules and a browser-side statistical baseline. The backend should be added beside the existing frontend rather than reorganizing the frontend folder.
+
+Figure 1. Target modular backend architecture.
+Preservation contract  Never edit the source-data files in place. Preserve `src/components`, `src/pages`, `src/styles`, existing `src/data` local fallbacks and the current color/design system. Frontend code edits are limited to a service adapter, API data mapping, configuration and error/loading wiring.
+ | 
+2. Proposed repository layout
+dhrupad-05-goldmcx/├── index.html                         # unchanged├── package.json                       # preserve existing dependencies/scripts├── src/                               # existing frontend retained│   ├── components/                    # visual components unchanged│   ├── data/                          # local fallback data retained│   ├── lib/                           # current calculations retained during parity checks│   ├── pages/                         # minimal service-integration changes│   ├── services/                      # NEW: apiClient, contracts, signals, model, backtests│   └── types/                         # compatible DTO mapping├── GoldMcx_Data - Copy/               # existing source directory, read-only├── [additional BhavCopy files]        # original files preserved where provided├── backend/│   ├── pyproject.toml│   ├── .env.example│   ├── alembic.ini│   ├── app/│   │   ├── main.py│   │   ├── core/                      # settings, logging, errors│   │   ├── api/v1/routes/              # health, dashboard, contracts, signals...│   │   ├── schemas/                   # Pydantic request/response models│   │   ├── db/                        # SQLAlchemy session/models/migrations│   │   ├── repositories/              # database access│   │   ├── services/                  # ingest, clean, normalize, score, backtest│   │   └── adapters/                  # parsers by source format│   ├── tests/│   ├── scripts/import_sources.py│   └── storage/                       # backend-owned logs/quarantine/export only├── docker-compose.yml                 # optional development services└── .env.example                       # root-level frontend configuration if desired
+ | 
+3. Architecture decisions
+Decision
+ | Choice
+ | Reason / constraint
+ | 
+Backend style
+ | FastAPI modular monolith
+ | One deployable API, but separated services and modules; avoid microservice overhead.
+ | 
+Database
+ | PostgreSQL
+ | Structured time-series-ish data, foreign keys, uniqueness constraints, JSONB source payload/provenance.
+ | 
+Data frame work
+ | Pandas + NumPy
+ | Flexible parsing and calculations for report-like datasets and historical series.
+ | 
+Validation
+ | Pydantic v2
+ | Explicit API and configuration schemas.
+ | 
+Database access
+ | SQLAlchemy 2 + Alembic
+ | Typed ORM/migrations; auditable schema evolution.
+ | 
+Initial anomaly method
+ | Robust median/MAD modified z-score
+ | Matches the existing frontend baseline and is deterministic/easy to test.
+ | 
+Advanced ML
+ | scikit-learn later
+ | Isolation Forest/other models only after correct data and temporal evaluation are established.
+ | 
+Frontend integration
+ | REST adapter with LOCAL/API mode
+ | Retains the existing screens and provides safe incremental migration.
+ | 
+Background work
+ | CLI/scheduler first; queue later if necessary
+ | Daily imports are initially small; do not introduce Redis/Celery without need.
+ | 
+
+4. Configuration and runtime
+Variable
+ | Purpose
+ | Example / rule
+ | 
+APP_ENV
+ | Runtime profile
+ | development / test / production
+ | 
+API_PREFIX
+ | Versioned API prefix
+ | /api/v1
+ | 
+DATABASE_URL
+ | PostgreSQL connection
+ | postgresql+psycopg://...; secret lives only in backend env
+ | 
+CORS_ORIGINS
+ | Allowed frontend origins
+ | Explicit list; do not use wildcard with credentials
+ | 
+MCX_DATA_DIR
+ | Root directory to scan
+ | Absolute path to the existing source folder; configurable, not hardcoded
+ | 
+MCX_EXTRA_FILES_DIR
+ | Optional standalone imports
+ | Separate read-only folder for extra BhavCopy samples
+ | 
+DATA_WRITE_MODE
+ | Source mutation guard
+ | Fixed to read_only for source roots
+ | 
+DEMO_FALLBACK_ENABLED
+ | Whether UI may use local demo datasets when API fails
+ | true in development; carefully controlled elsewhere
+ | 
+LOG_LEVEL
+ | Application logging
+ | INFO by default; avoid logging secrets/full sensitive payloads
+ | 
+IMPORT_MAX_FILE_MB
+ | Upload/import size cap
+ | Configurable safety limit
+ | 
+
+5. Source discovery and ingestion
+5.1 Supported content detection
+Do not select a parser using only a .xls/.xlsx extension. Sniff the content signature and parse strategy, because legacy `.xls` downloads may actually be HTML tables. Keep parser choice and detected media type in the source manifest.
+Detected source format
+ | Parser strategy
+ | Handling
+ | 
+HTML table saved as .xls
+ | Read small byte prefix; parse with pandas.read_html or a controlled HTML parser.
+ | Store parser type; validate column names and row counts.
+ | 
+Native legacy XLS
+ | Use xlrd-compatible parser where available.
+ | Check sheet names, types and headers; preserve original bytes.
+ | 
+XLSX
+ | Use openpyxl/pandas where appropriate.
+ | Validate worksheet/schema.
+ | 
+CSV
+ | Use pandas/read_csv with encoding/delimiter detection and explicit date parsing.
+ | Report ambiguous formats instead of guessing silently.
+ | 
+PDF contract documents
+ | Register/hash; optional text extraction for suggestions.
+ | Human-reviewed contract master is authoritative; original PDF remains unchanged.
+ | 
+Unsupported/unknown
+ | Do not try unsafe coercion.
+ | Quarantine with reason and provide a data-quality report.
+ | 
+
+5.2 Source categories
+Futures price source: rows explicitly classified as futures (e.g., FUTCOM) with a recognized target symbol, trade date, actual expiry and valid price fields.
+Activity report: detail/summary reports containing traded lots and aggregate total value. Store separately from price bars; aggregate value divided by lots may be an activity-derived proxy, not an official settlement price.
+Options/OPTFUT source: classify separately. Do not join into target futures series solely because the underlying symbol says GOLD.
+Contract specification: store references and verified effective-dated metadata, including source document and reviewer/status.
+Illustrative TypeScript data: stays in frontend fallback and is never ingested into verified market tables as genuine market data.
+5.3 Ingestion workflow
+Configured read-only source root        ↓Discover file + SHA-256 + byte size        ↓Sniff content / select parser        ↓Parse to source-specific raw rows        ↓Classify: futures / activity / options / specs / unknown        ↓Validate schema, dates, symbol, expiry, prices and activity        ↓Accepted rows ───────── Rejected/ambiguous rows      ↓                           ↓Staging + quality tag         Quarantine/report only      ↓Normalized tables + lineage      ↓Features / novelty / API
+ | 
+5.4 Import safety
+Source roots are opened read-only; importer cannot output generated files to the source root.
+At the start of import, compute a manifest with SHA-256 hashes. In tests, verify original hashes are unchanged after scan/import.
+Use a database transaction for each file or bounded batch. Failed files should not leave partial normalized rows.
+Make imports idempotent using source hash + row hash + natural keys; reimport should update status, not duplicate the same source row.
+Use row-level reasons for quarantine; e.g. unsupported instrument, missing date, missing expiry, OHLC absent, invalid OHLC order, all-zero activity, unknown symbol, ambiguous quote basis.
+Never fabricate missing OHLC values from totals or fill absent observations by forward/backward filling without an explicit analytical rule.
+6. Data validation and quality states
+State
+ | Meaning
+ | Permitted use
+ | 
+VERIFIED
+ | Schema and semantic checks pass, and source is suitable for the intended calculation.
+ | Eligible for normalized series/features subject to contract mapping.
+ | 
+PROVISIONAL
+ | Parsed but some source/semantics assumptions remain unconfirmed.
+ | Exploration only; visibly labelled and excluded from validated performance claims by default.
+ | 
+ILLUSTRATIVE
+ | Frontend demo/fabricated example data.
+ | UI demonstration only; never reported as actual market evidence.
+ | 
+QUARANTINED
+ | Unsupported, ambiguous, malformed or unsuitable for requested analysis.
+ | Data-quality view only; excluded from analytical outputs.
+ | 
+
+The first imported BhavCopy examples must be assessed rather than assumed valid. If a sample contains option rows, missing OHLC values, or no useful activity, the importer records the file and explains why it is not eligible for the target futures-price service. Other valid source files may still be imported independently.
+7. Canonical contract and pair model
+7.1 Canonical identities
+Canonical contract ID
+ | Display symbol
+ | Important metadata
+ | 
+GOLDM
+ | GOLDM
+ | Trading unit, quote basis, purity, effective-dated expiry specification.
+ | 
+GOLDTEN
+ | GOLDTEN
+ | Use only from verified listing history; short history must be explicit.
+ | 
+GOLDGUINEA
+ | GOLDGUINEA
+ | Check the relevant quote/conversion rule from official specification; avoid unsupported adjustments.
+ | 
+GOLDPETAL
+ | GOLDPETAL
+ | Small-unit contract; activity/liquidity limitations must be visible.
+ | 
+
+7.2 Pair identifiers and frontend compatibility
+Backend canonical pairs are fixed, stable identifiers: GOLDM-GOLDTEN, GOLDM-GOLDGUINEA, GOLDM-GOLDPETAL, GOLDTEN-GOLDGUINEA, GOLDTEN-GOLDPETAL, GOLDGUINEA-GOLDPETAL. The current frontend has a legacy typo `REST-GOLDPETAL` for the last pair. Preserve the frontend source initially and translate that alias at the API adapter boundary; do not store the typo as canonical backend identity.
+7.3 Specification versioning
+Contract metadata must be effective-dated: `valid_from`, `valid_to`, `source_document_id`, `verification_status`, `trading_unit_grams`, `quote_grams`, `purity_per_mille`, and a `quote_rule`/`fine_grams_per_quote` rule as approved. The normalization service must use the specification valid on the observation date, not automatically apply current metadata to all history.
+Normalization rule  Use a common comparable price only after verifying how the official contract price is quoted. For standard contracts where the quote price applies to a known gross quoted quantity, price per fine gram can be calculated as quote price divided by quote grams × purity fraction. If a contract has a special quotation/premium rule, encode that rule explicitly and test it; never assume a generic formula fits every contract.
+ | 
+8. Core analytics and novelty detection
+8.1 Feature pipeline
+Feature group
+ | Initial features
+ | Rules
+ | 
+Price relationship
+ | Normalized value, pair spread %, price ratio, return difference.
+ | Compute from compatible instrument/expiry/date mappings.
+ | 
+Robust statistics
+ | Rolling median, MAD, robust modified z-score, IQR fallback.
+ | Window only uses observations available by score timestamp.
+ | 
+Activity
+ | Volume/lots, OI, pair ratios where records are comparable.
+ | Aggregate activity reports are not market depth.
+ | 
+Expiry lifecycle
+ | Days to expiry, expiry window, contract age.
+ | Use actual contract expiry; do not splice near-month contracts silently.
+ | 
+Regime/context
+ | Gold return, rolling volatility, regime label if justified.
+ | Do not remove crisis data mechanically; account for common movement/regime.
+ | 
+
+8.2 Statistical baseline parity
+First backend release should reproduce the existing `src/lib/anomalyScore.ts` behaviour so frontend and backend results can be compared. The existing implementation uses median, MAD, modified z = 0.6745 × (x − median) / scale, absolute threshold 3.5, score min(|z|/6, 1), an IQR/1.349 fallback when MAD is approximately zero, and a small scale floor as the final fallback. Preserve and test these rules before making improvements.
+median = median(training_spreads)MAD = median(abs(x - median) for x in training_spreads)scale = MAD if MAD > epsilon else IQR / 1.349scale = scale if scale > epsilon else configured_floorrobust_z = 0.6745 * (new_spread - median) / scalescore = min(abs(robust_z) / 6, 1)is_anomaly = abs(robust_z) >= 3.5
+ | 
+8.3 Training/score contract
+Calibration is specific to canonical contract pair and a declared feature/configuration version.
+Calibration training window is explicit (start/end dates and cutoff timestamp); score-time observation and future observations are excluded.
+Only observations marked eligible by data-quality and expiry/contract mapping rules can enter the training sample.
+Mostly-normal training observations are expected, not guaranteed. Record training row IDs, quality filtering, count, median, scale, fallback type, threshold and algorithm version.
+The baseline scores primarily one relative-spread feature; do not describe it as a multivariate Isolation Forest unless a different model is genuinely implemented.
+Anomaly score is not a calibrated probability, not proof of mispricing, and not evidence of profitability.
+Add Isolation Forest only as a separate model version after baseline tests, sufficient clean examples, and chronological evaluation exist.
+8.4 Explainable result DTO
+{  "pair_id":"GOLDM-GOLDPETAL", "observation_date":"YYYY-MM-DD", "data_status":"PROVISIONAL",  "algorithm":"robust_mad_v1", "feature":"normalized_spread_pct",  "calibration":{"n":100,"window_start":"...","window_end":"..."},  "observed_value":0.0, "training_median":0.0, "scale_value":0.0, "scale_method":"mad|iqr|floor",  "robust_z":0.0, "anomaly_score":0.0, "is_anomaly":false, "severity":"Normal|Watch|High",  "explanation":"...", "warnings":[]}
+ | 
+9. Database schema
+Use SQLAlchemy models and Alembic migrations. Prefer normalized relational tables for core keys and query paths, with JSONB payloads for source-specific raw columns that differ between report families.
+Table
+ | Important fields / constraints
+ | Purpose
+ | 
+source_files
+ | id, relative_path, sha256, size_bytes, detected_format, source_class, first_seen_at, parse_status
+ | File manifest and provenance; unique hash/path policy.
+ | 
+ingestion_runs
+ | id, started_at, completed_at, parser_version, counts JSONB, overall_status
+ | Audit each import/scan attempt.
+ | 
+raw_source_rows
+ | id, source_file_id, row_number, row_hash, raw_payload JSONB, validation_status, errors JSONB
+ | Immutable parsed staging records with source-row traceability.
+ | 
+contract_specs
+ | id, symbol, valid_from, valid_to, units, quote rule, purity, source_document_id, verification_status
+ | Versioned contract specification master.
+ | 
+futures_bars
+ | id, symbol, expiry_date, trade_date, OHLC, volume_lots, open_interest, source_row_id, data_status
+ | Eligible expiry-specific daily futures data; unique (symbol, expiry, date, source priority).
+ | 
+activity_daily
+ | id, symbol, trade_date, lots, total_value_lakhs, report_type, source_row_id, data_status
+ | Activity reports separate from OHLC bars.
+ | 
+normalized_prices
+ | id, symbol, expiry_date, trade_date, normalized_value, spec_version_id, source_status
+ | Derived comparable values; reproducible from source/spec version.
+ | 
+pair_features
+ | id, canonical_pair_id, expiry_left, expiry_right, trade_date, spread_pct, ratios/features, feature_version
+ | Pairwise features keyed by pair, expiry identities and date.
+ | 
+model_calibrations
+ | id, pair_id, algorithm_version, feature_version, train_start/end, cutoff_ts, n, median, scale, scale_method, threshold, config JSONB
+ | Reproducible calibration metadata.
+ | 
+anomaly_scores
+ | id, calibration_id, pair_feature_id/observation, robust_z, score, is_anomaly, severity, explanation, warnings JSONB
+ | Stored scored observations and explanations.
+ | 
+signals
+ | id, score_id, status, liquidity_status, expiry_status, cost_status, disposition, created_at
+ | Separate anomaly detection from post-detection disposition.
+ | 
+backtest_runs
+ | id, strategy_version, data_snapshot, start/end, costs JSONB, config JSONB, status, code_version
+ | Reproducible backtest runs.
+ | 
+backtest_metrics
+ | run_id, metric_name, metric_value, units, details JSONB
+ | Metrics with explicit units and definitions.
+ | 
+
+10. API specification
+All routes are versioned under `/api/v1`. Use Pydantic response models. Dates are ISO-8601; all responses should include a source/data-status field where market observations or derived metrics are returned.
+Method + route
+ | Purpose
+ | Notes
+ | 
+GET /health/live
+ | Process liveness.
+ | No DB dependency.
+ | 
+GET /health/ready
+ | Readiness.
+ | Checks DB connectivity/migrations.
+ | 
+GET /api/v1/dashboard/summary
+ | Cards, top signals, data freshness/status.
+ | Supports local fallback at frontend adapter.
+ | 
+GET /api/v1/contracts
+ | Four canonical contract instruments.
+ | Specifications and verification status.
+ | 
+GET /api/v1/contracts/{symbol}
+ | Details for selected instrument.
+ | Effective spec and source notes.
+ | 
+GET /api/v1/contracts/{symbol}/series
+ | Expiry/date-filtered price series.
+ | Require expiry or explicitly defined contract-selection rule.
+ | 
+GET /api/v1/comparisons?left=&right=&range=
+ | Normalized pair series and features.
+ | Canonicalize pair; reject same/unknown symbol.
+ | 
+GET /api/v1/signals
+ | Filter/search/paginate signals.
+ | Filter by status/type/pair/date/source quality.
+ | 
+GET /api/v1/signals/{signal_id}
+ | Signal detail and reasoning.
+ | Includes not-a-trade warning.
+ | 
+GET /api/v1/model/pairs/{pair_id}/training-summary
+ | Calibration info.
+ | Training window/count/quality status.
+ | 
+POST /api/v1/model/pairs/{pair_id}/calibrate
+ | Create calibration version.
+ | Requires explicit date window/config; no silent overwrite.
+ | 
+POST /api/v1/model/pairs/{pair_id}/score
+ | Score a new/selected observation.
+ | Returns algorithm, status, warnings and score.
+ | 
+GET /api/v1/events
+ | Historical event records.
+ | Filter by pair/category/time/data status.
+ | 
+GET /api/v1/backtests
+ | List prior runs.
+ | Paginate and filter by strategy/version.
+ | 
+POST /api/v1/backtests/run
+ | Create a walk-forward backtest.
+ | Small local run may be synchronous; larger run returns run ID/status.
+ | 
+POST /api/v1/ingestion/scan
+ | Scan configured data root.
+ | No writes into source root.
+ | 
+POST /api/v1/ingestion/import
+ | Import approved discovered files.
+ | Trusted local/admin route; row-level validation.
+ | 
+GET /api/v1/ingestion/runs/{run_id}
+ | Import status and counts.
+ | Accepted/rejected/quarantined and error sample.
+ | 
+GET /api/v1/ingestion/quality-report
+ | Latest data-health summary.
+ | By file, source class, symbol, dates and reason.
+ | 
+
+11. Frontend integration without redesign
+11.1 Adapter strategy
+Add a thin `src/services/` layer. Page components should not call `fetch` independently. API DTOs should be mapped into the existing TypeScript types (Contract, DemoSignal, HistoricalEvent, BacktestScenario, NoveltyObservation). Keep the present visual components and existing local dataset modules untouched.
+src/services/  apiClient.ts              # base URL, timeout, JSON/error handling  contractsService.ts       # list/detail/series adapters  comparisonService.ts      # pair + date range adapters  signalsService.ts         # filters and details  modelService.ts            # calibration/score endpoints  backtestService.ts         # runs and metrics  dataSource.ts              # local/api/hybrid mode selection  compatibility.ts           # legacy aliases + DTO mapping
+ | 
+11.2 Data-source modes
+Mode
+ | Behavior
+ | Use
+ | 
+local
+ | Existing TypeScript data; no network dependency.
+ | Keep as permanent demo/fallback and for visual regression.
+ | 
+api
+ | Backend is source of truth; API failures show error states.
+ | Integration tests/staging.
+ | 
+hybrid
+ | API for supported market data and analytics; static local research/learn content remains local.
+ | Recommended transition mode.
+ | 
+
+Configure using `VITE_DATA_MODE=local|api|hybrid` and `VITE_API_BASE_URL`. If API fallback is enabled, show an explicit fallback/data status; never quietly present local illustrative data as backend-verified market data.
+11.3 Legacy pair alias
+canonical: GOLDGUINEA-GOLDPETALlegacy frontend alias: REST-GOLDPETALadapter: canonicalizePairId(id) -> canonical IDresponse mapper: optionally expose legacy display ID only to the current UIstorage and analytics: canonical ID only
+ | 
+12. Security, reliability and operations
+Use environment variables for secrets and database URLs. Commit only .env.example placeholders.
+Limit CORS to the configured frontend origin(s); do not enable wildcard credentialed CORS.
+Keep ingestion/import/calibration/backtest-admin operations local or access-controlled; do not expose arbitrary filesystem paths to clients.
+Resolve source file paths under the configured root and reject path traversal/symlinks escaping the root.
+Enforce upload size limits, supported file types, parser timeouts and safe error messages.
+Use structured logs with request IDs and import-run IDs. Do not log credentials.
+Use database transactions, unique constraints and idempotent import keys.
+Expose liveness and readiness checks separately. A running process with an unavailable DB should not report full readiness.
+For first release, use Docker Compose for API + PostgreSQL if available; avoid adding Redis/Celery until workload demands it.
+13. Testing strategy
+Test layer
+ | Required tests
+ | 
+Parser tests
+ | HTML disguised as XLS, native XLS, CSV, expected headers, blank sheets, invalid dates, malformed encodings, unsupported file.
+ | 
+Immutability tests
+ | Hash each source file before/after scan/import; assert identical hashes and no generated files written in source root.
+ | 
+Data-quality tests
+ | OPTFUT excluded from futures bars; zero activity remains zero/no price; missing OHLC quarantined; no invalid date/expiry accepted.
+ | 
+Normalization tests
+ | Hand-calculated values for each quote rule; effective-dated spec; special contract conversion only when verified.
+ | 
+Pair tests
+ | Six unique pairs; order-independent lookup; `REST-GOLDPETAL` alias maps to canonical pair without changing DB IDs.
+ | 
+Novelty tests
+ | MAD path, IQR fallback, scale floor, positive/negative z, threshold edge, deterministic outputs and calibration excludes scored row.
+ | 
+Temporal tests
+ | Feature windows and calibrations use only available history; random row split is prohibited for evaluation.
+ | 
+API tests
+ | Response schema, invalid symbol/pair, filters, pagination, errors, readiness and data-status field.
+ | 
+Integration tests
+ | UI local mode still works; API mode routes load; API down behavior is graceful; no visual/layout changes.
+ | 
+Backtest tests
+ | Cost arithmetic, fill timing assumptions, expiry restrictions, reproducibility and no future leakage.
+ | 
+
+14. Implementation sequence and gates
+Phase
+ | Implementation
+ | Required evidence to proceed
+ | 
+0. Audit
+ | Inventory repo and source types; freeze hashes; resolve contract/pair mapping contract.
+ | Audit report and approved mappings.
+ | 
+1. Skeleton
+ | FastAPI app, config, logging, health endpoints, PostgreSQL, migrations.
+ | App starts; readiness works; smoke tests pass.
+ | 
+2. Ingestion
+ | Read-only manifest, content sniffing, parser adapters, staging and quality report.
+ | Original hashes unchanged; bad rows quarantined.
+ | 
+3. Market master
+ | Contract-spec versioning, futures bars, activity tables, normalization.
+ | Known-value normalization tests pass.
+ | 
+4. Analytics
+ | Pair features, robust novelty baseline, scoring/explanation API.
+ | Backend output matches approved fixtures/current baseline where equivalent.
+ | 
+5. UI adapter
+ | API clients, DTO mapper, feature flag, minimal page data-source changes.
+ | Visual parity + local fallback passes.
+ | 
+6. Backtest
+ | Walk-forward evaluation, costs, benchmark and stored run metadata.
+ | No-lookahead tests and reproducible run.
+ | 
+7. Hardening
+ | Caching, scheduling, health/metrics/logs, deployment docs.
+ | Operational checklist passes.
+ | 
+
+15. Definition of done
+Backend has a documented install/run process and working health/readiness endpoints.
+Database schema is migration-managed, not only created ad hoc.
+Original frontend visual components/pages and source data files have not been destructively changed.
+Every imported file is registered with SHA-256, detected format, source class, parser version and import result.
+Input files are never changed; quarantine/export/log storage is outside the raw source root.
+Options/activity/specification rows are not silently mixed into futures OHLC history.
+Canonical contract IDs and all six canonical pair IDs are stable.
+Normalizing and novelty-scoring calculations have independent unit tests and transparent explanations.
+All market/derived API results carry provenance/data quality and algorithm version as applicable.
+Existing frontend has local mode and preserves its visual design; API/hybrid mode is configurable.
+Walk-forward validation uses chronologically separated training/test windows and reports costs/assumptions.
+Data limitations and unverified metrics are documented in README and API/UI status messages.
+Appendix A — Recommended dependencies
+Package
+ | Role
+ | Notes
+ | 
+fastapi + uvicorn[standard]
+ | HTTP API
+ | Async web application and local server.
+ | 
+pydantic-settings
+ | Configuration
+ | Typed environment configuration.
+ | 
+sqlalchemy + psycopg
+ | Database
+ | SQLAlchemy 2 and PostgreSQL driver.
+ | 
+alembic
+ | Migrations
+ | Version-controlled schema changes.
+ | 
+pandas + numpy
+ | Parsing/analytics
+ | Used in import and time-series services.
+ | 
+xlrd
+ | Native legacy XLS
+ | Only where the file is genuinely XLS; do not confuse HTML-table XLS.
+ | 
+beautifulsoup4 / lxml
+ | HTML-table parsing
+ | Content-sniffing parser for HTML disguised with .xls extension.
+ | 
+pypdf (optional)
+ | PDF text extraction
+ | Convenience only; specification values still require review.
+ | 
+pytest + httpx
+ | Tests
+ | Unit and FastAPI integration tests.
+ | 
+
+Appendix B — Backend environment example
+# backend/.env.example (illustrative)APP_ENV=developmentDATABASE_URL=postgresql+psycopg://mcx_app:change-me@localhost:5432/mcx_goldCORS_ORIGINS=http://localhost:5173MCX_DATA_DIR=../GoldMcx_Data - CopyMCX_EXTRA_FILES_DIR=../mcx-importsDATA_WRITE_MODE=read_onlyLOG_LEVEL=INFO
+ | 

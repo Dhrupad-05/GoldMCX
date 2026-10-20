@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Panel } from '../components/Panel'
 import { PriceComparisonChart } from '../components/PriceComparisonChart'
 import { SpreadChart } from '../components/SpreadChart'
@@ -11,6 +11,8 @@ import { pairLabel, type TimeRange } from '../lib/filters'
 import { fmtPct, fmtZ } from '../lib/demoUtil'
 import { StatusBadge, statusTone } from '../components/StatusBadge'
 import type { ContractId, DemoSignal } from '../types'
+import { dataMode } from '../services/dataSource'
+import { fetchComparisonByPair, type BackendComparison } from '../services/comparisonService'
 
 const TABS = ['Price Comparison', 'Spreads', 'Relative Value', 'Historical Correlation'] as const
 
@@ -63,6 +65,49 @@ export function ComparisonPage({
     if (side === 'L') setLeft(v === right ? left : v)
     else setRight(v === left ? right : v)
   }
+
+  // Backend overlay (api/hybrid modes only). Local mode keeps the page exactly
+  // as before; hybrid falls back with an explicit label rather than silently.
+  const mode = dataMode()
+  const [backendSpread, setBackendSpread] = useState<
+    { mode: 'backend' | 'local' | 'error'; note: string; data: BackendComparison | null }
+  >({ mode: 'local', note: '', data: null })
+
+  useEffect(() => {
+    if (mode === 'local') {
+      setBackendSpread({ mode: 'local', note: '', data: null })
+      return
+    }
+    let alive = true
+    import('../services/dataSource').then(async ({ withMode }) => {
+      const out = await withMode(() => fetchComparisonByPair(pairId), {
+        backendNote: 'Backend market data — activity-implied PROVISIONAL spreads, not settlement prices.',
+        fallbackNote: 'Backend unavailable — spread chart shows local illustrative data (not backend-verified).',
+      })
+      if (alive) {
+        setBackendSpread({ mode: out.mode, note: out.note, data: out.data })
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [pairId, mode, left, right])
+
+  const backendStats = useMemo(() => {
+    const pts = backendSpread.data?.points
+    if (!pts || pts.length === 0) return null
+    const spreads = pts.map((p) => p.spread_pct)
+    const center = [...spreads].sort((a, b) => a - b)[Math.floor(spreads.length / 2)]
+    return {
+      count: pts.length,
+      rangeStart: backendSpread.data!.range_start,
+      rangeEnd: backendSpread.data!.range_end,
+      centre: center,
+      latest: spreads[spreads.length - 1],
+      min: Math.min(...spreads),
+      max: Math.max(...spreads),
+    }
+  }, [backendSpread])
 
   return (
     <div className="space-y-4">
@@ -147,13 +192,30 @@ export function ComparisonPage({
 
         {tab === 'Spreads' && (
           <div className="pt-2">
+            {backendSpread.note && (
+              <p className={`text-[10.5px] rounded-lg px-2.5 py-1.5 mb-2 border ${
+                backendSpread.mode === 'backend' ? 'text-[#2E6447] bg-[#3F8061]/8 border-[#3F8061]/25'
+                : backendSpread.mode === 'error' ? 'text-[#8C2B2B] bg-[#B33838]/8 border-[#B33838]/30'
+                : 'text-[#8F5D1D] bg-[#B87928]/8 border-[#B87928]/25'
+              }`}>
+                {backendSpread.note}
+              </p>
+            )}
             <SpreadChart pairId={pairId} range={range} showBand height={240} />
             <div className="grid grid-cols-3 gap-2 mt-3">
-              {[
-                ['Band centre', `${medianOf(pairId).toFixed(2)}%`],
-                ['Latest spread', `${(SPREAD_SERIES[pairId][SPREAD_SERIES[pairId].length - 1]?.spreadPct ?? 0).toFixed(2)}%`],
-                ['Range (90d)', `${(Math.min(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}% – ${(Math.max(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}%`],
-              ].map(([k, v]) => (
+              {(
+                backendStats
+                  ? [
+                      [`Band centre (backend, n=${backendStats.count})`, `${backendStats.centre.toFixed(2)}%`],
+                      [`Latest spread ${backendStats.rangeEnd} (backend)`, `${backendStats.latest.toFixed(2)}%`],
+                      [`Range (backend, ${backendStats.rangeStart.slice(0, 7)}…${backendStats.rangeEnd.slice(0, 7)})`, `${backendStats.min.toFixed(2)}% – ${backendStats.max.toFixed(2)}%`],
+                    ]
+                  : [
+                      ['Band centre', `${medianOf(pairId).toFixed(2)}%`],
+                      ['Latest spread', `${(SPREAD_SERIES[pairId][SPREAD_SERIES[pairId].length - 1]?.spreadPct ?? 0).toFixed(2)}%`],
+                      ['Range (90d)', `${(Math.min(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}% – ${(Math.max(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}%`],
+                    ]
+              ).map(([k, v]) => (
                 <div key={k} className="bg-appBg border border-border rounded-lg p-2.5 text-center">
                   <p className="text-[9.5px] font-semibold text-muted uppercase">{k}</p>
                   <p className="text-[12.5px] font-bold text-text mt-0.5">{v}</p>

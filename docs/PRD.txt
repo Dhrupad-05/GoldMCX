@@ -1,0 +1,354 @@
+
+HACK IN HILLS ’26  |  PS-03
+Product RequirementsDocument (PRD)
+Backend integration plan that preserves the current frontend and original data assets
+
+ | 
+Version
+ | 1.0 — Backend integration baseline
+ | 
+Date
+ | 20 October 2026
+ | 
+Status
+ | Implementation-ready draft
+ | 
+Application
+ | Existing React + TypeScript + Vite frontend
+ | 
+Backend target
+ | FastAPI + PostgreSQL modular monolith
+ | 
+Data handling
+ | Original frontend and source data files preserved
+ | 
+Primary objective
+ | Add a reliable backend without redesigning the existing UI
+ | 
+PRESERVATION RULE
+The existing UI and original data files are protected assets. Add the backend beside the frontend, read source files without modifying them, and introduce only a small API adapter for data access. Keep local demo mode available until the backend is validated.
+
+Document control
+Field
+ | Value
+ | 
+Purpose
+ | Define the product outcomes, scope, acceptance criteria and staged rollout for adding a reliable backend to the existing MCX Gold Intelligence application.
+ | 
+Current baseline
+ | React 18 + TypeScript + Vite; existing dashboard pages, chart components and local typed datasets.
+ | 
+Design principle
+ | Preserve all current visual components, layout, colour palette and demo workflows.
+ | 
+Data principle
+ | Treat source files as immutable inputs; import into separate staging/normalized storage with provenance.
+ | 
+Status
+ | Implementation specification; market-data correctness remains subject to source validation.
+ | 
+
+1. Executive summary
+MCX Gold Intelligence currently runs as a frontend-only React/TypeScript/Vite application with local TypeScript datasets and a browser-side median/MAD novelty-scoring baseline. The goal is to add a backend that provides centralized storage, source-data ingestion, normalization, pairwise relative-value features, anomaly scoring, signals and reproducible backtesting while keeping the existing UI visually unchanged.
+Non-negotiable  Do not delete, rename, rewrite, reformat or move the existing frontend source tree or original market-data files. The backend is additive. Any frontend integration change must be limited to a thin data-access adapter and minimal call-site changes, with a working local-demo fallback.
+ | 
+2. Current-state baseline
+The repository snapshot contains index.html, package.json, Vite/Tailwind/TypeScript configuration, src/App.tsx, reusable components, eight main page modules, local data modules and src/lib/anomalyScore.ts. The existing pages include Dashboard, Signals, Contracts, Comparison, Model Demo, Market Insights, Learn and Backtest & Events.
+Existing local datasets include contracts.ts, marketSeries.ts, spreads.ts, noveltyTraining.ts, testObservations.ts, signals.ts, historicalEvents.ts, researchCards.ts and backtestScenarios.ts. These must remain available as a local mode during migration.
+The supplied source-data folder contains contract PDFs and date-wise detail/summary reports, plus separate commodity-wise BhavCopy examples. Files with an .xls extension may be HTML tables rather than native Excel workbooks; the importer must detect content format instead of trusting the extension alone.
+Known integration risk  The current frontend contains a legacy pair identifier REST-GOLDPETAL where the canonical pair is GOLDGUINEA-GOLDPETAL. The backend must use canonical identifiers and a compatibility adapter must preserve existing frontend behavior until a deliberate frontend fix is approved.
+ | 
+3. Product vision and goals
+3.1 Product vision
+Provide a reliable analytical service behind the current product that turns traceable source records into contract-aware, normalized relative-value observations and explainable anomaly outputs, then exposes them to the existing dashboard.
+3.2 Goals
+Keep the existing React UI visually and behaviourally consistent while moving data and analytics behind versioned APIs.
+Preserve original source files; record file hashes, source paths, import attempts and validation results.
+Distinguish futures price data from aggregate activity reports, options data, contract specifications and illustrative demo data.
+Maintain a canonical contract/pair model and version contract specifications by effective date.
+Centralize normalization and anomaly-scoring logic so the frontend does not become a competing source of analytics truth.
+Provide traceable data-quality outcomes and explicit statuses: verified, provisional, illustrative or quarantined.
+Provide the foundation for walk-forward backtesting without look-ahead leakage or unsupported profit claims.
+3.3 Non-goals for the first backend release
+No broker integration or real-money order execution.
+No prediction guarantee, investment advice or profitability guarantee.
+No requirement to replace the frontend design system or redesign the existing pages.
+No automatic extraction of legally/economically authoritative contract rules from PDFs without verification.
+No forced adoption of a deep-learning model before a simple statistical baseline and data pipeline are validated.
+No destructive cleanup or in-place conversion of the uploaded source files.
+4. Target users and use cases
+User / system actor
+ | Primary need
+ | Expected outcome
+ | 
+Research user
+ | Inspect contracts, series, spreads and anomaly reasoning.
+ | The same UI pages load data consistently from an API.
+ | 
+Prototype/demo user
+ | Open the website even if backend or market data is unavailable.
+ | Local demo mode remains functional and clearly labelled.
+ | 
+Data maintainer
+ | Import new files and understand what was accepted or rejected.
+ | A traceable ingestion report with row-level reasons.
+ | 
+Analyst / model reviewer
+ | Reproduce a calibration and score an observation.
+ | Versioned, pair-specific statistics and deterministic score output.
+ | 
+Developer
+ | Change backend logic without touching original data files.
+ | Separated API, services, repository and source-data directories.
+ | 
+
+5. Scope and requirement priorities
+ID
+ | Requirement
+ | Priority
+ | Acceptance summary
+ | 
+PR-01
+ | Frontend preservation
+ | P0
+ | Existing page layout, styling and interactions remain visually unchanged; API integration uses an adapter.
+ | 
+PR-02
+ | Immutable data assets
+ | P0
+ | Original file hashes are unchanged after scanning/import; no importer writes into the source folder.
+ | 
+PR-03
+ | Backend health/API baseline
+ | P0
+ | Health/readiness endpoint works; API schemas and errors are predictable.
+ | 
+PR-04
+ | Source registry and ingestion report
+ | P0
+ | Every discovered file has detected format, source type, checksum and import status.
+ | 
+PR-05
+ | Data quality gate
+ | P0
+ | Invalid, unsupported or mismatched data is quarantined/reported, never silently relabelled as futures prices.
+ | 
+PR-06
+ | Contract master + canonical pairs
+ | P0
+ | Four target symbols and six unique canonical pairs; historical specification versions supported.
+ | 
+PR-07
+ | Normalization and features
+ | P0
+ | Calculation inputs/outputs are explicit, tested and traceable to source rows/specification version.
+ | 
+PR-08
+ | Novelty baseline service
+ | P0
+ | Pair-specific calibration and deterministic scoring are callable through API.
+ | 
+PR-09
+ | Dashboard/contracts/comparison APIs
+ | P1
+ | Existing views can load data through API adapter without visual redesign.
+ | 
+PR-10
+ | Signals/detail APIs
+ | P1
+ | Filtering and detail views reflect persisted or reproducibly computed signal data.
+ | 
+PR-11
+ | Walk-forward backtest
+ | P1
+ | Chronological evaluation, cost assumptions and run metadata are stored.
+ | 
+PR-12
+ | Scheduled ingestion/background jobs
+ | P2
+ | Imports and longer backtests run outside request path when required.
+ | 
+PR-13
+ | Deployment and monitoring hardening
+ | P2
+ | Documented environment, migrations, logging and operational checks.
+ | 
+
+6. Data policy and current limitations
+6.1 Immutable source policy
+The existing `GoldMcx_Data - Copy/` folder and separately added BhavCopy files are input assets only.
+The backend may read and checksum the files, but may not rename, rewrite, re-save, reformat, delete or move them.
+Parsed data, quarantine files, manifests, logs, cache files and exports must live under backend-owned directories or PostgreSQL.
+Keep exact relative path, SHA-256 checksum, byte size, detected media format, discovered time, import run and parser version.
+6.2 Source classes
+Class
+ | Use
+ | Rule
+ | 
+Futures Bhavcopy / FUTCOM
+ | Potential primary source for expiry-specific OHLC, volume and OI.
+ | Eligible only after schema and row-level validation.
+ | 
+Date-wise Detail report
+ | Trade activity/lots and aggregate value.
+ | Store in activity tables; do not treat aggregate value per lot as an official closing price.
+ | 
+Date-wise Summary report
+ | Summary-level activity.
+ | Separate source class; avoid double-counting with Detail reports.
+ | 
+OPTFUT / option rows
+ | Options-related or option-on-futures data.
+ | Do not admit to the four-futures price-series table by symbol name alone.
+ | 
+Contract-specification PDF
+ | Reference for contract and expiry rules.
+ | Register and extract for review; authoritative normalized fields require a verified versioned contract master.
+ | 
+Existing TypeScript demo data
+ | Fallback / UI continuity.
+ | Keep intact; label as illustrative and never merge silently with verified prices.
+ | 
+
+Data-quality status  Every dataset/observation must carry provenance and a quality class: VERIFIED, PROVISIONAL, ILLUSTRATIVE or QUARANTINED. The application must not present a provisional or illustrative price as a verified MCX price.
+ | 
+7. Key user journeys
+7.1 Dashboard load
+1. Frontend requests the dashboard summary and data status.
+2. Backend returns contract cards, latest validated/eligible signals, source freshness and quality labels.
+3. If the API is unavailable, the adapter may use local demo data only when fallback mode is explicitly enabled.
+4. UI design and current components remain unchanged.
+7.2 Import and validate source files
+1. Admin/developer configures the source folder via MCX_DATA_DIR; default expected location is the existing data folder beside the frontend.
+2. Importer discovers files and computes checksums without modifying them.
+3. Parser sniffs native XLS, HTML-table XLS, CSV and PDF by content/signature as well as extension.
+4. Rows are staged, classified and validated; ambiguous/unsupported rows are quarantined with reasons.
+5. Import report shows discovered/parsed/accepted/rejected counts and data-quality status.
+7.3 Compare contracts and score novelty
+1. Frontend selects two canonical contract instruments and, where relevant, explicit expiry contracts.
+2. Backend returns normalized series/spread with source and contract-specification version.
+3. For the selected pair, backend calibrates only on the allowed historical training window.
+4. A held-out/new observation is scored without using itself or future data in calibration.
+5. Response explains the score, threshold, calibration window, input quality, expiry and liquidity flags.
+8. Non-functional requirements
+ID
+ | Requirement
+ | Target
+ | 
+NFR-01
+ | Performance
+ | Simple list/detail requests should normally return within 500 ms for a local demo-size dataset; heavier backtests may take longer and report status.
+ | 
+NFR-02
+ | Reliability
+ | API exceptions become structured errors; frontend does not crash if backend is unavailable.
+ | 
+NFR-03
+ | Reproducibility
+ | Same dataset, configuration and algorithm version produce the same results.
+ | 
+NFR-04
+ | Traceability
+ | Each derived observation/signal can be traced to source file/row, spec version and algorithm version.
+ | 
+NFR-05
+ | Safety
+ | No credential or path-traversal exposure; ingestion only scans the configured root.
+ | 
+NFR-06
+ | Maintainability
+ | Modular backend; business logic independent of FastAPI handlers and database sessions.
+ | 
+NFR-07
+ | Visual preservation
+ | No changes to existing design tokens, CSS or page layout unless explicitly approved.
+ | 
+NFR-08
+ | Data honesty
+ | No live-feed, training, accuracy or profitability claims without corresponding evidence.
+ | 
+
+9. Release plan
+Stage
+ | Deliverable
+ | Exit gate
+ | 
+R0 — Audit
+ | Inventory repo/source files, agree API DTOs, identify aliases and source-type rules.
+ | No destructive edits; risk list approved.
+ | 
+R1 — Backend skeleton
+ | FastAPI, config, logging, health/readiness, PostgreSQL and migrations.
+ | Startup and DB smoke tests pass.
+ | 
+R2 — Data intake
+ | Source manifest, parsers, staging, data quality report.
+ | Source-file hashes unchanged; unusable rows are quarantined.
+ | 
+R3 — Core analytics
+ | Contract master, normalization, pair features and statistical novelty endpoint.
+ | Known-value formula tests pass.
+ | 
+R4 — UI integration
+ | API adapter and dashboard/contracts/comparison/signals/model API integration.
+ | Visual regression check and local fallback verified.
+ | 
+R5 — Validation
+ | Walk-forward engine, cost assumptions, reports and monitoring.
+ | Time leakage tests pass; results reproducible.
+ | 
+
+10. Risks and mitigations
+Risk
+ | Impact
+ | Mitigation
+ | 
+Wrong report type imported as futures price
+ | False prices and misleading anomalies.
+ | Sniff content and instrument type; quarantine options; gate on valid OHLC and expiry.
+ | 
+Summary/Detail double count
+ | Inflated activity metrics.
+ | Distinct source classes, row hashes and semantic de-duplication rules.
+ | 
+Incorrect or stale contract specification
+ | Biased normalization.
+ | Effective-dated contract master with source document, review status and formula tests.
+ | 
+Near-month series mixes expiries
+ | Artificial spread jumps.
+ | Key price rows by symbol + expiry_date + trade_date.
+ | 
+Legacy pair alias mismatch
+ | Comparison/model page returns wrong or missing data.
+ | Canonical backend pair IDs and adapter alias mapping; telemetry/log warnings.
+ | 
+Backtest leakage
+ | Optimistic performance.
+ | Chronological split, calibration cutoff enforcement and leakage tests.
+ | 
+Backend integration breaks frontend
+ | Screens regress.
+ | Feature flag, adapter boundary, existing local mode, screenshot/route smoke tests.
+ | 
+Original data files changed
+ | Data provenance lost.
+ | Read-only mount, checksums before/after import and tests asserting no source writes.
+ | 
+
+11. Definition of done
+Existing frontend source/data files remain present; current pages still build and render.
+Original data folder is read-only to the application, with no changed file hashes after ingestion.
+Backend starts with documented commands and has health/readiness endpoints.
+Ingestion report distinguishes parsed, accepted, rejected and unsupported inputs.
+Core tables separate futures prices from activity reports and option rows.
+All four symbols and six canonical pairs are handled without silent fallbacks to a different pair.
+Normalization and anomaly scoring have automated unit tests.
+Score response includes provenance, calibration period, scale fallback and algorithm version.
+Frontend can run in local demo mode if backend is unavailable and can switch to API mode by configuration.
+Build/test commands, environment variables, data limitations and known gaps are documented.
+Appendix A — Repository preservation contract
+dhrupad-05-goldmcx/├── index.html                     # preserve├── package.json                   # preserve; only add scripts if approved├── src/                            # preserve UI/pages/components/styles│   ├── components/                 # no visual redesign│   ├── data/                       # keep local demo fallback intact│   ├── lib/                        # baseline logic retained during migration│   ├── pages/                      # minimal data-access changes only│   ├── services/                   # NEW: API client / adapters│   └── types/                      # preserve and extend only if required├── GoldMcx_Data - Copy/            # original source, read-only├── backend/                        # NEW: FastAPI application├── docker-compose.yml              # NEW, optional local orchestration└── .env.example                    # NEW; no real secrets
+ | 
+Appendix B — Reference
+Problem context: Hack in Hills ’26, PS-03 Commodity Derivatives Intelligence. Official MCX market-data entry point: https://www.mcxindia.com/market-data/bhavcopy. Contract specifications must be verified from the relevant official, effective-dated MCX specification before their values are relied upon.
