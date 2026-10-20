@@ -1,1 +1,9 @@
 node_modules
+dist
+.freebuff
+.venv/
+__pycache__/
+*.pyc
+backend/storage/
+backend/.env
+.pytest_cache/
