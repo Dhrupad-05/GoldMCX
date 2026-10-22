@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import evaluation, market, source  # noqa: F401 - register mappers
+from app.models import evaluation, live, market, request, source  # noqa: F401 - register mappers
 
 config = context.config
 if config.config_file_name is not None:
@@ -16,10 +16,26 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
+    """Resolve the migration URL, honoring scratch/CI overrides.
+
+    Precedence (most specific first):
+    1. ``-x database_url_override=<url>`` on the alembic command line.
+    2. ``DATABASE_URL_OVERRIDE`` env var (kept identical to app.db.session so
+       tests/CI can point both alembic and the app at the same scratch DB).
+    3. ``MIGRATION_DATABASE_URL`` (Supabase direct/session-capable URL used for
+       migrations while the app pool may use the transaction pooler).
+    4. ``MIGRATION_DATABASE_URL`` setting, then ``DATABASE_URL`` setting.
+    """
+    import os
+
     override = context.get_x_argument(as_dictionary=True).get("database_url_override")
     if override:
         return override
-    return get_settings().database_url
+    env_override = os.environ.get("DATABASE_URL_OVERRIDE")
+    if env_override:
+        return env_override
+    settings = get_settings()
+    return os.environ.get("MIGRATION_DATABASE_URL") or settings.migration_database_url or settings.database_url
 
 
 def run_migrations_offline() -> None:
