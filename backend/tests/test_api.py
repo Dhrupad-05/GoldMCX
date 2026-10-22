@@ -67,9 +67,21 @@ def test_comparison_alias_and_canonical_equivalence(api_seeded):
 
 
 def test_comparison_series_range_filter(api_seeded):
+    # range_days anchors on the clock today; the seeded fixture lives in Jan
+    # 2024, so a 30-day lookback legitimately has no rows. Anchor the window
+    # explicitly instead, and assert the SQL filter narrows the result.
     c, _ = api_seeded
-    r = c.get("/api/v1/comparisons", params={"pair": "GOLDM-GOLDPETAL", "range_days": 30})
-    assert r.status_code == 200
+    full = c.get("/api/v1/comparisons", params={"pair": "GOLDM-GOLDPETAL"})
+    assert full.status_code == 200
+    ranged = c.get(
+        "/api/v1/comparisons",
+        params={"pair": "GOLDM-GOLDPETAL", "start": "2024-01-05", "end": "2024-01-15"},
+    )
+    assert ranged.status_code == 200
+    all_dates = [p["trade_date"] for p in full.json()["points"]]
+    ranged_dates = [p["trade_date"] for p in ranged.json()["points"]]
+    assert 0 < len(ranged_dates) < len(all_dates)
+    assert all("2024-01-05" <= d <= "2024-01-15" for d in ranged_dates)
 
 
 def test_contract_series_endpoint(api_seeded):

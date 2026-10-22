@@ -4,6 +4,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFound
+from app.core.idempotency import (
+    commit_result,
+    idempotency_key_of,
+    replay_or_claim,
+)
+from app.db.locking import locked
 from app.db.session import get_session
 from app.ingestion import pipeline
 from app.models.source import IngestionRun, RawSourceRow, SourceFile
@@ -35,14 +41,42 @@ def _ensure_admin(request: Request) -> None:
 @router.post("/scan")
 def scan(request: Request, session: Session = Depends(get_session)):
     _ensure_admin(request)
-    out = pipeline.scan_sources(session)
+    idem_key = idempotency_key_of(request)
+    route = "POST /api/v1/ingestion/scan"
+    if idem_key:
+        replay = replay_or_claim(session, route, idem_key, request_hash_scan(request))
+        if replay["payload"] is not None:
+            return replay["payload"]
+    with locked(session, "ingestion:scan"):
+        out = pipeline.scan_sources(session)
+    if idem_key:
+        commit_result(session, route, idem_key, request_hash_scan(request), out, result_ref=out.get("run_id"))
+        session.commit()
     return out
+
+
+def request_hash_scan(request: Request) -> str:
+    import hashlib
+
+    return hashlib.sha256(str(request.query_params).encode()).hexdigest()
 
 
 @router.post("/import")
 def import_sources(request: Request, session: Session = Depends(get_session)):
     _ensure_admin(request)
-    return pipeline.import_sources(session)
+    idem_key = idempotency_key_of(request)
+    route = "POST /api/v1/ingestion/import"
+    body_hash = request_hash_scan(request)
+    if idem_key:
+        replay = replay_or_claim(session, route, idem_key, body_hash)
+        if replay["payload"] is not None:
+            return replay["payload"]
+    with locked(session, "ingestion:import", "ingestion:derived"):
+        out = pipeline.import_sources(session)
+    if idem_key:
+        commit_result(session, route, idem_key, body_hash, out, result_ref=out.get("run_id"))
+        session.commit()
+    return out
 
 
 @router.get("/runs/{run_id}")

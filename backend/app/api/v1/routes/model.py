@@ -1,7 +1,7 @@
 """Model endpoints: pair calibration summaries, calibration, scoring."""
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 from app.analytics.features import FEATURE_VERSION
 from app.anomaly import service as anomaly_service
 from app.core.errors import InvalidInput, NotFound
+from app.core.idempotency import (
+    commit_result,
+    idempotency_key_of,
+    replay_or_claim,
+    request_fingerprint,
+)
 from app.core.pairs import resolve_pair_id
+from app.db.locking import locked
 from app.db.session import get_session
 from app.models.evaluation import ModelCalibration
 from app.schemas.api import CalibrationOut, ScoreRequest
@@ -53,19 +60,32 @@ def training_summary(pair_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/pairs/{pair_id}/calibrate", response_model=CalibrationOut)
-def calibrate(pair_id: str, body: CalibrateRequest | None = None,
+def calibrate(pair_id: str, request: Request, body: CalibrateRequest | None = None,
               session: Session = Depends(get_session)):
     canonical = resolve_pair_id(pair_id)
     body = body or CalibrateRequest()
-    cal = anomaly_service.calibrate_pair(
-        session,
-        canonical,
-        body.train_start,
-        body.train_end,
-        threshold=body.threshold or 3.5,
-        scale_floor_fraction=body.scale_floor_fraction,
-    )
-    return cal
+    route = f"POST /api/v1/model/pairs/{canonical}/calibrate"
+    idem_key = idempotency_key_of(request)
+    body_hash = request_fingerprint(body.model_dump(mode="json"))
+    if idem_key:
+        replay = replay_or_claim(session, route, idem_key, body_hash)
+        if replay["payload"] is not None:
+            return CalibrationOut(**replay["payload"])
+    with locked(session, f"calibration:{canonical}:robust_mad_v1"):
+        cal = anomaly_service.calibrate_pair(
+            session,
+            canonical,
+            body.train_start,
+            body.train_end,
+            threshold=body.threshold or 3.5,
+            scale_floor_fraction=body.scale_floor_fraction,
+        )
+        result = cal
+    if idem_key:
+        payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else dict(result)
+        commit_result(session, route, idem_key, body_hash, payload)
+        session.commit()
+    return result
 
 
 @router.post("/pairs/{pair_id}/score")

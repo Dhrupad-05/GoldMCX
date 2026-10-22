@@ -1,13 +1,19 @@
 """Backtest endpoints. Runs are synchronous (small local data) and stored."""
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.backtesting import walkforward
 from app.core.errors import NotFound
+from app.core.idempotency import (
+    commit_result,
+    idempotency_key_of,
+    replay_or_claim,
+    request_fingerprint,
+)
 from app.core.pairs import resolve_pair_id
 from app.db.session import get_session
 from app.models.evaluation import BacktestMetric, BacktestRun
@@ -51,23 +57,46 @@ def list_backtests(
     ]
 
 
+def run_walkforward_guarded(session: Session, canonical: str, body: BacktestRequest,
+                            **overrides) -> "BacktestRun":
+    """Run the walk-forward inside the documented ordered advisory locks.
+
+    Resources (in global order): pair:<canonical> and backtest:<run-scope>;
+    locks release with the transaction (strict two-phase)."""
+    from app.db.locking import locked
+
+    with locked(session, f"pair:{canonical}", f"backtest:{body.start}-{body.end}-{body.pair_id}"):
+        return walkforward.run_walkforward(
+            session,
+            canonical,
+            body.start,
+            body.end,
+            train_end_cutoff=None,
+            threshold=overrides.get("threshold", body.threshold),
+            cost_bps_per_leg=overrides.get("cost_bps_per_leg", body.cost_bps_per_leg),
+            slippage_bps_per_leg=overrides.get("slippage_bps_per_leg", body.slippage_bps_per_leg),
+        )
+
+
 @router.post("/run")
-def run_backtest(body: BacktestRequest, session: Session = Depends(get_session)):
+def run_backtest(request: Request, body: BacktestRequest, session: Session = Depends(get_session)):
     canonical = resolve_pair_id(body.pair_id)
-    run = walkforward.run_walkforward(
-        session,
-        canonical,
-        body.start,
-        body.end,
-        train_end_cutoff=None,
-        threshold=body.threshold,
+    route = "POST /api/v1/backtests/run"
+    idem_key = idempotency_key_of(request)
+    body_hash = request_fingerprint(body.model_dump(mode="json"))
+    if idem_key:
+        replay = replay_or_claim(session, route, idem_key, body_hash)
+        if replay["payload"] is not None:
+            return replay["payload"]
+    run = run_walkforward_guarded(
+        session, canonical, body, threshold=body.threshold,
         cost_bps_per_leg=body.cost_bps_per_leg,
         slippage_bps_per_leg=body.slippage_bps_per_leg,
     )
     metrics = session.execute(
         select(BacktestMetric).where(BacktestMetric.run_id == run.id)
     ).scalars().all()
-    return {
+    response = {
         "run": {
             "id": run.id,
             "pair_id": canonical,
@@ -96,3 +125,7 @@ def run_backtest(body: BacktestRequest, session: Session = Depends(get_session))
             "Results are strategy-relative screening evidence, not proven profitability."
         ),
     }
+    if idem_key:
+        commit_result(session, route, idem_key, body_hash, response, result_ref=run.id)
+        session.commit()
+    return response

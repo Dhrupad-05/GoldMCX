@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analytics.features import FEATURE_VERSION
+from app.cache import get_cache
 from app.core.errors import InvalidInput, NotFound
 from app.core.pairs import canonical_pair_id, pair_members, resolve_pair_id
 from app.db.session import get_session
@@ -35,24 +36,28 @@ def compare(
     l, r = pair_members(canonical)
     _ = (l, r)  # orientation irrelevant: canonical orientation is authoritative
 
-    q = select(PairFeature).where(
+    # All range filtering happens in SQL (bounded result sets; no full scan).
+    conds = [
         PairFeature.canonical_pair_id == canonical,
         PairFeature.feature_version == FEATURE_VERSION,
-    ).order_by(PairFeature.trade_date)
+    ]
+    if start:
+        conds.append(PairFeature.trade_date >= start)
+    if end:
+        conds.append(PairFeature.trade_date <= end)
+    if range_days:
+        from datetime import timedelta
+
+        floor = date.today() - timedelta(days=range_days)
+        conds.append(PairFeature.trade_date >= floor)
+    q = (
+        select(PairFeature)
+        .where(*conds)
+        .order_by(PairFeature.trade_date)
+    )
     rows = session.execute(q).scalars().all()
     if not rows:
-        raise NotFound(f"No pair features computed for '{canonical}'.")
-    if range_days:
-        end_date = rows[-1].trade_date
-        from datetime import timedelta
-        q_start = end_date - timedelta(days=range_days)
-        rows = [x for x in rows if x.trade_date >= q_start]
-    if start:
-        rows = [x for x in rows if x.trade_date >= start]
-    if end:
-        rows = [x for x in rows if x.trade_date <= end]
-    if not rows:
-        raise NotFound("No observations in the requested range for '{}'.".format(canonical))
+        raise NotFound(f"No pair features computed for '{canonical}' in the requested range.")
 
     return ComparisonResponse(
         pair_id=canonical,
