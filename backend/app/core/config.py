@@ -105,6 +105,11 @@ class Settings(BaseSettings):
         return False  # mcx_direct requires dedicated licensed feed access
 
     @property
+    def repo_root(self) -> Path:
+        """Repository root (parent of backend/); hosts the root-level ml/ package."""
+        return REPO_ROOT
+
+    @property
     def data_root(self) -> Path:
         p = Path(self.mcx_data_dir)
         if not p.is_absolute():

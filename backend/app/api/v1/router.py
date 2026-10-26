@@ -12,6 +12,7 @@ def _include_all() -> None:
         dashboard,
         events,
         ingestion,
+        ml_ops,
         model,
         signals,
     )
@@ -23,6 +24,7 @@ def _include_all() -> None:
     api_router.include_router(model.router)
     api_router.include_router(events.router)
     api_router.include_router(ingestion.router)
+    api_router.include_router(ml_ops.router)
     api_router.include_router(dashboard.router)
 
 
