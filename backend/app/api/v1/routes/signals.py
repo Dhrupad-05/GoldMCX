@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analytics.signals import evaluate_signal
+from app.cache import TTL_DEFAULTS, get_cache
 from app.core.errors import NotFound
 from app.core.pairs import resolve_pair_id
 from app.db.session import get_session
@@ -26,44 +27,62 @@ def list_signals(
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ):
-    q = (
-        select(SignalEvaluation, AnomalyScore)
-        .join(AnomalyScore, SignalEvaluation.score_id == AnomalyScore.id)
-        .order_by(AnomalyScore.observation_date.desc())
-        .limit(limit)
-        .offset(offset)
+    """Cache-backed filtered signal list; invalidation happens via dataset epoch."""
+    cache = get_cache()
+    params = {
+        "pair": pair,
+        "status": status,
+        "disposition": disposition,
+        "date_from": date_from.isoformat() if date_from else None,
+        "date_to": date_to.isoformat() if date_to else None,
+        "limit": limit,
+        "offset": offset,
+    }
+
+    def _load() -> list[SignalOut]:
+        q = (
+            select(SignalEvaluation, AnomalyScore)
+            .join(AnomalyScore, SignalEvaluation.score_id == AnomalyScore.id)
+            .order_by(AnomalyScore.observation_date.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        if pair:
+            canonical = resolve_pair_id(pair)
+            q = q.where(AnomalyScore.pair_id == canonical)
+        if status:
+            q = q.where(SignalEvaluation.status == status.upper())
+        if disposition:
+            q = q.where(SignalEvaluation.disposition == disposition.upper())
+        if date_from:
+            q = q.where(AnomalyScore.observation_date >= date_from)
+        if date_to:
+            q = q.where(AnomalyScore.observation_date <= date_to)
+        rows = session.execute(q).all()
+        out = []
+        for sig, score in rows:
+            out.append(SignalOut(
+                id=sig.id,
+                score_id=score.id,
+                pair_id=score.pair_id,
+                observation_date=score.observation_date,
+                status=sig.status,
+                disposition=sig.disposition,
+                severity=score.severity,
+                robust_z=float(score.robust_z),
+                score=float(score.score),
+                liquidity_status=sig.liquidity_status,
+                expiry_status=sig.expiry_status,
+                cost_status=sig.cost_status,
+                reason_codes=sig.reason_codes or [],
+                data_status=score.data_status,
+            ))
+        return [s.model_dump(mode="json") for s in out]
+
+    cached = cache.get_or_load(
+        cache.key("signals", params), TTL_DEFAULTS.signals, _load
     )
-    if pair:
-        canonical = resolve_pair_id(pair)
-        q = q.where(AnomalyScore.pair_id == canonical)
-    if status:
-        q = q.where(SignalEvaluation.status == status.upper())
-    if disposition:
-        q = q.where(SignalEvaluation.disposition == disposition.upper())
-    if date_from:
-        q = q.where(AnomalyScore.observation_date >= date_from)
-    if date_to:
-        q = q.where(AnomalyScore.observation_date <= date_to)
-    rows = session.execute(q).all()
-    out = []
-    for sig, score in rows:
-        out.append(SignalOut(
-            id=sig.id,
-            score_id=score.id,
-            pair_id=score.pair_id,
-            observation_date=score.observation_date,
-            status=sig.status,
-            disposition=sig.disposition,
-            severity=score.severity,
-            robust_z=float(score.robust_z),
-            score=float(score.score),
-            liquidity_status=sig.liquidity_status,
-            expiry_status=sig.expiry_status,
-            cost_status=sig.cost_status,
-            reason_codes=sig.reason_codes or [],
-            data_status=score.data_status,
-        ))
-    return out
+    return [SignalOut(**item) for item in cached]
 
 
 @router.get("/{signal_id}", response_model=SignalDetail)

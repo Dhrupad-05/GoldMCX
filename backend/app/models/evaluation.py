@@ -67,6 +67,9 @@ class AnomalyScore(Base):
     feature_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     data_status: Mapped[str] = mapped_column(String(24), nullable=False, default="PROVISIONAL")
     pair_feature_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Trained-ML provenance: registry model_version when scored by the ML
+    # artifact, else None (statistical-robust-MAD calibration rows).
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

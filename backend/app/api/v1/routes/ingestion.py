@@ -49,6 +49,9 @@ def scan(request: Request, session: Session = Depends(get_session)):
             return replay["payload"]
     with locked(session, "ingestion:scan"):
         out = pipeline.scan_sources(session)
+    from app.cache import get_cache as _get_cache
+
+    _get_cache().bump()  # committed scan manifest; derived reads may re-load
     if idem_key:
         commit_result(session, route, idem_key, request_hash_scan(request), out, result_ref=out.get("run_id"))
         session.commit()
@@ -73,6 +76,9 @@ def import_sources(request: Request, session: Session = Depends(get_session)):
             return replay["payload"]
     with locked(session, "ingestion:import", "ingestion:derived"):
         out = pipeline.import_sources(session)
+    from app.cache import get_cache as _get_cache
+
+    _get_cache().bump()  # committed new rows; cached reads refresh on next request
     if idem_key:
         commit_result(session, route, idem_key, body_hash, out, result_ref=out.get("run_id"))
         session.commit()

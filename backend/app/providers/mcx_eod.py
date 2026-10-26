@@ -68,13 +68,18 @@ def download_for_trade_day(trade_date: date, session: str = "1") -> Path:
     return dest
 
 
-def parse_bhavcopy_futures(path: Path) -> list[DailyBar]:
+def parse_bhavcopy_futures(path: Path, expected_trade_date: date | None = None) -> list[DailyBar]:
     """Parse expiry-specific futures rows from an MCX bhavcopy file.
 
     Official bhavcopy headers vary between file generations, so this parser
     maps from a documented candidate-header list, falling back to positional
     order ONLY against the official file layout, and QUARANTINES every row it
     cannot verify. Parser versioning records the mapping used.
+
+    When ``expected_trade_date`` is supplied, every verified row whose
+    Response trade date disagrees with the requested trade date is
+    QUARANTINED — a response for a different trading session must never be
+    accepted as the answer to the day that was requested.
     """
     import pandas as pd
 
@@ -160,6 +165,14 @@ def parse_bhavcopy_futures(path: Path) -> list[DailyBar]:
                 data_status="QUARANTINED",
             ))
             continue
+        if expected_trade_date is not None and trade_d != expected_trade_date:
+            out.append(DailyBar(
+                symbol=symbol, trade_date=trade_d.isoformat(), provider="mcx_bhavcopy",
+                open=None, high=None, low=None, close=None, volume=None,
+                open_interest=None, expiry_date=expiry.isoformat(),
+                data_status="QUARANTINED",
+            ))
+            continue
         pb_row = DailyBar(
             symbol=symbol, trade_date=trade_d.isoformat(), provider="mcx_bhavcopy",
             open=o, high=h, low=l, close=c,
@@ -180,21 +193,48 @@ def _clean_date(raw: str) -> date | None:
     return None
 
 
-def sync_recent(days: int = 7):
-    """Best-effort EOD sync; downloads what exists and records failures."""
+def sync_recent(days: int = 7, session=None) -> list[dict]:
+    """Download, parse, PERSIST official EOD bars; failures are recorded per day.
+
+    Persistence is mandatory: validated canonical rows are upserted into
+    ``ProviderDailyBar`` (idempotent by natural key), so downstream ML
+    pipelines read durable data, not just download counters.
+    """
+    from sqlalchemy.orm import Session as _Session
+
+    from app.services.eod_persistence import persist_daily_bars
+
+    own_session = session is None
+    if own_session:
+        from app.db.session import get_session as _get_session
+
+        session = next(_get_session())
+        assert isinstance(session, _Session)
     today = date.today()
     results = []
-    for i in range(days):
-        d = today - timedelta(days=i)
-        try:
-            path = download_for_trade_day(d)
-            rows = parse_bhavcopy_futures(path)
-            results.append({"trade_date": d.isoformat(), "status": "ok", "rows": len(rows)})
-        except ProviderError as exc:
-            results.append({
-                "trade_date": d.isoformat(),
-                "status": "unavailable",
-                "category": exc.category.value,
-                "detail": str(exc),
-            })
-    return results
+    try:
+        for i in range(days):
+            d = today - timedelta(days=i)
+            try:
+                path = download_for_trade_day(d)
+                rows = parse_bhavcopy_futures(path, expected_trade_date=d)
+                persist = persist_daily_bars(session, rows)
+                session.commit()
+                results.append({
+                    "trade_date": d.isoformat(),
+                    "status": "ok",
+                    "rows_parsed": len(rows),
+                    **persist,
+                })
+            except ProviderError as exc:
+                session.rollback()
+                results.append({
+                    "trade_date": d.isoformat(),
+                    "status": "unavailable",
+                    "category": exc.category.value,
+                    "detail": str(exc),
+                })
+        return results
+    finally:
+        if own_session:
+            session.close()

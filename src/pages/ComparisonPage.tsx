@@ -3,16 +3,17 @@ import { Panel } from '../components/Panel'
 import { PriceComparisonChart } from '../components/PriceComparisonChart'
 import { SpreadChart } from '../components/SpreadChart'
 import { RangeTabs } from '../components/RangeTabs'
-import { CONTRACTS, CONTRACT_MAP, ALL_PAIRS } from '../data/contracts'
-import { PRICE_SERIES, normalizedPrice } from '../data/marketSeries'
-import { SPREAD_SERIES } from '../data/spreads'
-import { signalForPair } from '../data/signalForPair'
-import { pairLabel, type TimeRange } from '../lib/filters'
-import { fmtPct, fmtZ } from '../lib/demoUtil'
 import { StatusBadge, statusTone } from '../components/StatusBadge'
-import type { ContractId, DemoSignal } from '../types'
+import { api, pairIdOf, pairLabel } from '../lib/api'
+import type { ContractSymbol } from '../lib/api'
+import { useApi } from '../lib/useApi'
+import { seriesToChartRows, sliceSeries } from '../lib/chartData'
+import type { TimeRange } from '../lib/filters'
+import { fmtPct, fmtZ } from '../lib/demoUtil'
 
 const TABS = ['Price Comparison', 'Spreads', 'Relative Value', 'Historical Correlation'] as const
+
+const SYMBOLS: ContractSymbol[] = ['GOLDM', 'GOLDTEN', 'GOLDGUINEA', 'GOLDPETAL']
 
 export function ComparisonPage({
   left,
@@ -21,48 +22,52 @@ export function ComparisonPage({
   setRight,
   onOpenSignal,
 }: {
-  left: ContractId
-  right: ContractId
-  setLeft: (c: ContractId) => void
-  setRight: (c: ContractId) => void
-  onOpenSignal: (s: DemoSignal) => void
+  left: string
+  right: string
+  setLeft: (c: string) => void
+  setRight: (c: string) => void
+  onOpenSignal: (pairId: string) => void
 }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Price Comparison')
   const [range, setRange] = useState<TimeRange>('3M')
-  const pairId = useMemo(
-    () => ALL_PAIRS.find((p) => (p.left === left && p.right === right) || (p.left === right && p.right === left))?.pairId ?? 'GOLDM-GOLDTEN',
+  const pairId = pairIdOf(left, right)
+  const rangeDays: Record<TimeRange, number> = { '1M': 30, '3M': 90, '6M': 182, '1Y': 365 }
+
+  const comparison = useApi(() => api.comparison(pairId, rangeDays[range]), [pairId, range])
+  const anomaly = useApi(() => api.latestAnomalies(pairId, 1), [pairId])
+  const seriesPair = useApi(
+    () => Promise.all([api.contractSeries(left), api.contractSeries(right)]),
     [left, right],
   )
-  const signal = signalForPair(pairId)
-  const cl = CONTRACT_MAP[left]
-  const cr = CONTRACT_MAP[right]
-  const nLeft = normalizedPrice(cl.demoPrice, cl.quoteGrams, cl.purity)
-  const nRight = normalizedPrice(cr.demoPrice, cr.quoteGrams, cr.purity)
-  const spreadNow = ((nLeft - nRight) / ((nLeft + nRight) / 2)) * 100
 
-  const corr = useMemo(() => {
-    const a = PRICE_SERIES[left]
-    const b = PRICE_SERIES[right]
-    const n = Math.min(a.length, b.length)
-    const ra = a.slice(-n).map((p) => p.value)
-    const rb = b.slice(-n).map((p) => p.value)
-    const ma = ra.reduce((s, v) => s + v, 0) / n
-    const mb = rb.reduce((s, v) => s + v, 0) / n
-    let num = 0
-    let da = 0
-    let db = 0
-    for (let i = 0; i < n; i++) {
-      num += (ra[i] - ma) * (rb[i] - mb)
-      da += (ra[i] - ma) ** 2
-      db += (rb[i] - mb) ** 2
-    }
-    return num / Math.sqrt(da * db)
-  }, [left, right])
-
-  const swapGuard = (side: 'L' | 'R', v: ContractId) => {
+  const swapGuard = (side: 'L' | 'R', v: string) => {
     if (side === 'L') setLeft(v === right ? left : v)
     else setRight(v === left ? right : v)
   }
+
+  const points = comparison.data?.points ?? []
+  const latest = points[points.length - 1]
+  const spreadValues = points
+    .map((p) => p.spread_pct)
+    .filter((v): v is number => v != null && Number.isFinite(v))
+  const stats = useMemo(
+    () => ({
+      min: spreadValues.length ? Math.min(...spreadValues) : null,
+      max: spreadValues.length ? Math.max(...spreadValues) : null,
+      med: spreadValues.length ? medianOfArr(spreadValues) : null,
+    }),
+    [spreadValues.join(',')],
+  )
+
+  const corr = useMemo(() => {
+    if (!seriesPair.data) return null
+    const rows = seriesToChartRows(seriesPair.data) as { date: string; [k: string]: number | string }[]
+    const sliced = sliceSeries(rows, range).filter((r) => typeof r[left] === 'number' && typeof r[right] === 'number')
+    if (sliced.length < 3) return null
+    const a = sliced.map((r) => Number(r[left]))
+    const b = sliced.map((r) => Number(r[right]))
+    return pearson(a, b)
+  }, [seriesPair.data, range, left, right])
 
   return (
     <div className="space-y-4">
@@ -73,26 +78,26 @@ export function ComparisonPage({
             <span className="text-[10.5px] font-bold text-muted uppercase tracking-wide">Analyse</span>
             <select
               value={left}
-              onChange={(e) => swapGuard('L', e.target.value as ContractId)}
+              onChange={(e) => swapGuard('L', e.target.value)}
               className="bg-card border border-border rounded-lg px-3 py-2 text-[12px] font-bold text-maroon outline-none"
             >
-              {CONTRACTS.map((c) => (
-                <option key={c.id} value={c.id}>{c.symbol}</option>
+              {SYMBOLS.map((c) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
             <span className="text-muted text-[12px]">vs</span>
             <select
               value={right}
-              onChange={(e) => swapGuard('R', e.target.value as ContractId)}
+              onChange={(e) => swapGuard('R', e.target.value)}
               className="bg-card border border-border rounded-lg px-3 py-2 text-[12px] font-bold text-maroon outline-none"
             >
-              {CONTRACTS.map((c) => (
-                <option key={c.id} value={c.id}>{c.symbol}</option>
+              {SYMBOLS.map((c) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-[11px] text-muted">6 unique pairs · currently {pairId}</span>
+            <span className="text-[11px] text-muted">canonical pair: {pairId}</span>
             <RangeTabs value={range} onChange={setRange} compact />
           </div>
         </div>
@@ -107,10 +112,10 @@ export function ComparisonPage({
       {/* Summary strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
-          ['Normalized left', `₹${nLeft.toFixed(0)} / fine g`, `per ${cl.quoteGrams} g · ${cl.purity} purity`],
-          ['Normalized right', `₹${nRight.toFixed(0)} / fine g`, `per ${cr.quoteGrams} g · ${cr.purity} purity`],
-          ['Current spread (demo)', fmtPct(spreadNow, 2), 'normalized relative spread'],
-          ['Correlation (demo)', corr.toFixed(2), 'of raw demo price series'],
+          ['Observations', String(comparison.data?.point_count ?? 0), 'overlapping verified dates'],
+          ['Latest spread', latest?.spread_pct != null ? fmtPct(latest.spread_pct, 2) : '—', latest?.trade_date ?? 'no data'],
+          ['Spread median', stats.med != null ? `${stats.med.toFixed(2)}%` : '—', 'all loaded observations'],
+          ['Window range', stats.min != null && stats.max != null ? `${stats.min.toFixed(2)}% – ${stats.max.toFixed(2)}%` : '—', 'min – max in range'],
         ].map(([k, v, sub]) => (
           <div key={k} className="bg-card border border-border rounded-xl p-3.5 shadow-panel">
             <p className="text-[9.5px] font-semibold uppercase tracking-wide text-muted">{k}</p>
@@ -119,6 +124,12 @@ export function ComparisonPage({
           </div>
         ))}
       </div>
+
+      {comparison.data && comparison.data.data_status !== 'OK' && (
+        <div className="bg-[#B87928]/10 border border-[#B87928]/25 rounded-xl px-4 py-2.5 text-[12px] text-[#8F5D1D] font-medium">
+          Pair status: {comparison.data.data_status}. Dates where either leg lacks a verified observation are skipped, never forward-filled.
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border px-1 overflow-x-auto thin-scroll">
@@ -138,9 +149,9 @@ export function ComparisonPage({
       <Panel>
         {tab === 'Price Comparison' && (
           <div className="pt-2">
-            <PriceComparisonChart ids={[left, right]} range={range} height={260} />
+            <PriceComparisonChart ids={[left as ContractSymbol, right as ContractSymbol]} range={range} height={260} />
             <p className="text-[10px] text-muted mt-1.5">
-              Both series re-based to ₹ per fine gram (quote basis × purity). Demo data.
+              Both series normalized to ₹ per fine gram using verified contract specs (quote basis × purity).
             </p>
           </div>
         )}
@@ -148,34 +159,32 @@ export function ComparisonPage({
         {tab === 'Spreads' && (
           <div className="pt-2">
             <SpreadChart pairId={pairId} range={range} showBand height={240} />
-            <div className="grid grid-cols-3 gap-2 mt-3">
-              {[
-                ['Band centre', `${medianOf(pairId).toFixed(2)}%`],
-                ['Latest spread', `${(SPREAD_SERIES[pairId][SPREAD_SERIES[pairId].length - 1]?.spreadPct ?? 0).toFixed(2)}%`],
-                ['Range (90d)', `${(Math.min(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}% – ${(Math.max(...SPREAD_SERIES[pairId].map((p) => p.spreadPct))).toFixed(2)}%`],
-              ].map(([k, v]) => (
-                <div key={k} className="bg-appBg border border-border rounded-lg p-2.5 text-center">
-                  <p className="text-[9.5px] font-semibold text-muted uppercase">{k}</p>
-                  <p className="text-[12.5px] font-bold text-text mt-0.5">{v}</p>
-                </div>
-              ))}
-            </div>
+            <p className="text-[10px] text-muted mt-1.5">
+              spread = (nL − nR) / ((nL + nR) / 2). Only real, verified, overlapping dates are charted.
+            </p>
           </div>
         )}
 
         {tab === 'Relative Value' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-2">
             <div className="space-y-2 text-[12.5px] text-text leading-relaxed">
-              <p><strong>{cl.symbol}</strong> is quoted per {cl.quoteGrams} g at {cl.purity} purity; <strong>{cr.symbol}</strong> is quoted per {cr.quoteGrams} g at {cr.purity} purity.</p>
-              <p>After normalization both are expressed in ₹ per fine gram: ₹{nLeft.toFixed(0)} vs ₹{nRight.toFixed(0)}, a relative spread of <strong>{fmtPct(spreadNow, 2)}</strong> (demo values).</p>
-              <p className="text-muted text-[11.5px]">A spread wider than the pair&rsquo;s usual carry + premium structure may indicate an unusual regime — but the anomaly screen, liquidity, expiry and cost guards decide whether to watch, act or ignore.</p>
+              <p>
+                <strong>{left}</strong> and <strong>{right}</strong> are normalized to ₹ per fine gram from the backend's verified specifications.
+              </p>
+              <p>
+                The relative spread between them on the latest overlapping date is{' '}
+                <strong>{latest?.spread_pct != null ? fmtPct(latest.spread_pct, 2) : 'not yet available'}</strong>, computed from {comparison.data?.point_count ?? 0} real observations in this window.
+              </p>
+              <p className="text-muted text-[11.5px]">
+                A spread wider than the pair&rsquo;s usual structure may indicate an unusual regime — but the anomaly screen, liquidity, expiry and cost guards decide whether to watch, act or ignore.
+              </p>
             </div>
             <div className="bg-appBg border border-border rounded-xl p-4 space-y-2.5">
               {[
-                ['Quote basis difference', cl.quoteGrams === cr.quoteGrams ? 'Same basis' : `${cl.quoteGrams} g vs ${cr.quoteGrams} g`],
-                ['Purity gap', `${Math.abs(cl.purity - cr.purity)} (${cl.purity} vs ${cr.purity})`],
-                ['Unit ratio', `${(cl.tradingUnitGrams / cr.tradingUnitGrams).toFixed(2)}× (lot exposure)`],
-                ['Demo price ratio', `${(cl.demoPrice / cr.demoPrice).toFixed(2)}× (per quote)`],
+                ['Pair id', pairId],
+                ['Range loaded', comparison.data ? `${comparison.data.range_start} → ${comparison.data.range_end}` : '—'],
+                ['Overlapping dates', String(comparison.data?.point_count ?? 0)],
+                ['Data status', comparison.data?.data_status ?? '—'],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
                   <span className="text-[11.5px] text-muted">{k}</span>
@@ -190,8 +199,8 @@ export function ComparisonPage({
           <div className="pt-2 space-y-4">
             <div className="grid grid-cols-3 gap-3">
               {[
-                ['Correlation (demo)', corr.toFixed(3)],
-                ['Corr. last 30 sessions', corr30(left, right).toFixed(3)],
+                ['Correlation', corr == null ? '—' : corr.toFixed(3)],
+                ['Days used', String(points.length)],
                 ['Shared gold beta', 'High'],
               ].map(([k, v]) => (
                 <div key={k} className="bg-appBg border border-border rounded-lg p-3 text-center">
@@ -201,49 +210,64 @@ export function ComparisonPage({
               ))}
             </div>
             <p className="text-[12px] text-muted leading-relaxed">
-              All four contracts share international gold beta, so raw-price correlation is high across every pair. Relative-value work subtracts this common movement; what remains is the contract-specific residual that the novelty detector evaluates.
+              All four contracts share international gold beta, so raw-price correlation is high across every pair. Relative-value work subtracts this common movement; what remains is the contract-specific residual the novelty detector evaluates.
             </p>
           </div>
         )}
       </Panel>
 
       {/* Latest anomaly classification */}
-      {signal && (
-        <Panel title="Latest anomaly classification for this pair" subtitle="From the shared signals dataset" icon={<span className="text-[13px]">⚡</span>}>
-          <button
-            onClick={() => onOpenSignal(signal)}
-            className="w-full flex flex-wrap items-center gap-3 p-3 bg-appBg border border-border rounded-xl hover:bg-warmwhite transition-colors text-left"
-          >
-            <StatusBadge tone={statusTone(signal.status)} dot>{signal.status}</StatusBadge>
-            <div className="min-w-0 flex-1">
-              <p className="text-[12.5px] font-bold text-text">{signal.title}</p>
-              <p className="text-[11px] text-muted">{signal.date} · {signal.type}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[12px] font-bold text-maroon">score {signal.score.toFixed(2)} · z {fmtZ(signal.robustZ)}</p>
-              <p className="text-[10px] text-muted">liquidity: {signal.liquidity} · expiry: {signal.daysToExpiry}d</p>
-            </div>
-          </button>
+      {anomaly.data && anomaly.data.anomalies.length > 0 && (
+        <Panel title="Latest scored observation for this pair" subtitle="From the model registry's latest anomalies" icon={<span className="text-[13px]">⚡</span>}>
+          {anomaly.data.anomalies.map((a) => (
+            <button
+              key={a.score_id}
+              onClick={() => onOpenSignal(a.pair_id)}
+              className="w-full flex flex-wrap items-center gap-3 p-3 bg-appBg border border-border rounded-xl hover:bg-warmwhite transition-colors text-left"
+            >
+              <StatusBadge tone={a.is_anomaly ? statusTone(a.severity) : 'green'} dot>
+                {a.is_anomaly ? a.severity : 'Normal'}
+              </StatusBadge>
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] font-bold text-text">{pairLabel(a.pair_id)}</p>
+                <p className="text-[11px] text-muted">{a.observation_date} · {a.disposition?.disposition ?? '—'}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[12px] font-bold text-maroon">score {a.score.toFixed(2)} · z {fmtZ(a.robust_z)}</p>
+                <p className="text-[10px] text-muted">{a.model_version ?? 'baseline scored'}</p>
+              </div>
+            </button>
+          ))}
+        </Panel>
+      )}
+      {anomaly.data && anomaly.data.anomalies.length === 0 && !anomaly.loading && (
+        <Panel title="Latest scored observation for this pair" subtitle="No scored record yet">
+          <p className="text-[11.5px] text-muted">
+            This pair has no anomaly record in the database yet. It will be scored automatically once verified EOD history lands.
+          </p>
         </Panel>
       )}
     </div>
   )
 }
 
-function medianOf(pairId: string): number {
-  const arr = SPREAD_SERIES[pairId].map((p) => p.spreadPct).sort((a, b) => a - b)
-  return arr[Math.floor(arr.length / 2)]
+function medianOfArr(vals: number[]): number {
+  const arr = [...vals].sort((a, b) => a - b)
+  const n = arr.length
+  return n % 2 ? arr[(n - 1) / 2] : (arr[n / 2 - 1] + arr[n / 2]) / 2
 }
 
-function corr30(l: ContractId, r: ContractId): number {
-  const a = PRICE_SERIES[l].slice(-30).map((p) => p.value)
-  const b = PRICE_SERIES[r].slice(-30).map((p) => p.value)
+function pearson(a: number[], b: number[]): number {
   const n = a.length
   const ma = a.reduce((s, v) => s + v, 0) / n
   const mb = b.reduce((s, v) => s + v, 0) / n
-  let num = 0, da = 0, db = 0
-  for (let i = 0; i < n; i++) { num += (a[i] - ma) * (b[i] - mb); da += (a[i] - ma) ** 2; db += (b[i] - mb) ** 2 }
-  return num / Math.sqrt(da * db)
+  let num = 0
+  let da = 0
+  let db = 0
+  for (let i = 0; i < n; i++) {
+    num += (a[i] - ma) * (b[i] - mb)
+    da += (a[i] - ma) ** 2
+    db += (b[i] - mb) ** 2
+  }
+  return da === 0 || db === 0 ? 0 : num / Math.sqrt(da * db)
 }
-
-export { pairLabel, CONTRACTS }

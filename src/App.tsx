@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
-import { DemoReset } from './components/DemoReset'
 import { SignalDetailModal } from './components/SignalDetailModal'
 import { Modal } from './components/Modal'
 import { DashboardPage } from './pages/DashboardPage'
@@ -13,40 +12,41 @@ import { InsightsPage } from './pages/InsightsPage'
 import { LearnPage } from './pages/LearnPage'
 import { EventsBacktestPage } from './pages/EventsBacktestPage'
 import { insightById } from './lib/filters'
-import { SIGNALS } from './data/signals'
-import { CONTRACTS } from './data/contracts'
-import { viewIdFor } from './data/getContract'
-import type { ContractId, DemoSignal, ViewId } from './types'
+import { useMarketStream } from './lib/useMarketStream'
+import { vmFromAnomaly } from './lib/signalVM'
+import type { SignalVM } from './lib/signalVM'
+import type { MarketStreamState } from './lib/useMarketStream'
+import type { ContractSymbol, MlAnomaly, ViewId } from './lib/api'
+import { API_BASE } from './lib/api'
 
 const INITIAL = {
   view: 'dashboard' as ViewId,
-  contract: 'GOLDM' as ContractId,
-  left: 'GOLDM' as ContractId,
-  right: 'GOLDTEN' as ContractId,
+  contract: 'GOLDM' as ContractSymbol,
+  left: 'GOLDM' as ContractSymbol,
+  right: 'GOLDTEN' as ContractSymbol,
   query: '',
-  researchMode: true,
 }
 
 export default function App() {
   const [view, setView] = useState<ViewId>(INITIAL.view)
   const [query, setQuery] = useState(INITIAL.query)
-  const [activeSignal, setActiveSignal] = useState<DemoSignal | null>(null)
+  const [activeSignal, setActiveSignal] = useState<SignalVM | null>(null)
   const [activeInsightId, setActiveInsightId] = useState<string | null>(null)
-  const [selectedContract, setSelectedContract] = useState<ContractId>(INITIAL.contract)
-  const [compareLeft, setCompareLeft] = useState<ContractId>(INITIAL.left)
-  const [compareRight, setCompareRight] = useState<ContractId>(INITIAL.right)
+  const [selectedContract, setSelectedContract] = useState<ContractSymbol>(INITIAL.contract)
+  const [compareLeft, setCompareLeft] = useState<string>(INITIAL.left)
+  const [compareRight, setCompareRight] = useState<string>(INITIAL.right)
   const [comparisonRange, setComparisonRange] = useState<'1M' | '3M' | '6M' | '1Y'>('3M')
-  const [detailRange, setDetailRange] = useState<'1M' | '3M' | '6M' | '1Y'>('1M')
-  const [researchMode, setResearchMode] = useState(INITIAL.researchMode)
+  const [detailRange, setDetailRange] = useState<'1M' | '3M' | '6M' | '1Y'>('3M')
+
+  const stream = useMarketStream()
 
   const navigate = useCallback((v: ViewId) => {
     setView(v)
     setActiveSignal(null)
   }, [])
 
-  const openSignalById = useCallback((id: string) => {
-    const s = SIGNALS.find((x) => x.id === id)
-    if (s) setActiveSignal(s)
+  const openAnomaly = useCallback((a: MlAnomaly) => {
+    setActiveSignal(vmFromAnomaly(a))
   }, [])
 
   // Insight modal via custom event (used by dashboard cards)
@@ -56,66 +56,48 @@ export default function App() {
     return () => window.removeEventListener('open-insight', handler)
   }, [])
 
-  const reset = useCallback(() => {
-    setView(INITIAL.view)
-    setQuery(INITIAL.query)
-    setActiveSignal(null)
-    setActiveInsightId(null)
-    setSelectedContract(INITIAL.contract)
-    setCompareLeft(INITIAL.left)
-    setCompareRight(INITIAL.right)
-    setComparisonRange('3M')
-    setDetailRange('1M')
-    setResearchMode(INITIAL.researchMode)
-  }, [])
-
   const activeInsight = activeInsightId ? insightById(activeInsightId) : null
 
   const viewMeta = useMemo(() => {
-    const c = CONTRACTS.find((x) => x.id === selectedContract)!
-    return { title: view, sub: `${c.symbol} selected · demo data` }
-  }, [view, selectedContract])
+    return {
+      title: view,
+      sub: `API: ${API_BASE || 'same origin'} · data served by FastAPI`,
+    }
+  }, [view])
 
   return (
     <div className="flex h-full">
-      <Sidebar
-        activeView={view}
-        onNavigate={navigate}
-        researchMode={researchMode}
-        onToggleResearchMode={() => setResearchMode((r) => !r)}
-      />
+      <Sidebar activeView={view} onNavigate={navigate} researchMode onToggleResearchMode={() => {}} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar
           query={query}
           onQueryChange={setQuery}
-          onOpenSignal={openSignalById}
           onNavigate={(target) => {
-            const v = viewIdFor(target)
+            const v = viewIdSafe(target)
             if (v) navigate(v)
           }}
-          onOpenResult={(id) => setActiveInsightId(id)}
           onSelectContract={(id) => {
-            setSelectedContract(id as ContractId)
+            setSelectedContract(id as ContractSymbol)
             navigate('contracts')
           }}
-          activeSignalId={activeSignal?.id}
+          stream={stream}
         />
         {/* Inline sub-toolbar */}
         <div className="flex items-center justify-between px-6 py-2 border-b border-border/60 bg-appBg">
           <div className="min-w-0">
             <p className="text-[10px] uppercase tracking-[0.2em] text-muted font-bold">{viewMeta.title}</p>
-            <p className="text-[10.5px] text-muted truncate">Illustrative data — not a live MCX feed; scores are demo calculations</p>
+            <p className="text-[10.5px] text-muted truncate">{viewMeta.sub}</p>
           </div>
-          <DemoReset onReset={reset} />
         </div>
 
         <main className="flex-1 overflow-y-auto thin-scroll p-6">
           {view === 'dashboard' && (
             <DashboardPage
+              stream={stream}
               onNavigate={navigate}
-              onOpenSignal={setActiveSignal}
+              onOpenSignal={openAnomaly}
               onSelectContract={(id) => {
-                setSelectedContract(id)
+                if (isSymbol(id)) setSelectedContract(id)
                 setView('contracts')
               }}
               comparisonRange={comparisonRange}
@@ -126,7 +108,7 @@ export default function App() {
               setCompareLeft={setCompareLeft}
             />
           )}
-          {view === 'signals' && <SignalsPage onOpenSignal={setActiveSignal} />}
+          {view === 'signals' && <SignalsPage onNavigateComparison={(pid) => { applyPair(pid); navigate('comparison') }} />}
           {view === 'contracts' && (
             <ContractsPage selected={selectedContract} onSelect={setSelectedContract} />
           )}
@@ -136,7 +118,7 @@ export default function App() {
               right={compareRight}
               setLeft={setCompareLeft}
               setRight={setCompareRight}
-              onOpenSignal={setActiveSignal}
+              onOpenSignal={(pid) => applyPair(pid)}
             />
           )}
           {view === 'model' && <ModelPage />}
@@ -146,17 +128,17 @@ export default function App() {
         </main>
       </div>
 
-      <SignalDetailModal signal={activeSignal} onClose={() => setActiveSignal(null)} onNavigateComparison={() => {
-        if (activeSignal) {
-          const [l, r] = activeSignal.pairId.split('-')
-          if (CONTRACTS.some((c) => c.id === l)) setCompareLeft(l as ContractId)
-          if (CONTRACTS.some((c) => c.id === r)) setCompareRight(r as ContractId)
-        }
-        setView('comparison')
-        setActiveSignal(null)
-      }} />
+      <SignalDetailModal
+        signal={activeSignal}
+        onClose={() => setActiveSignal(null)}
+        onNavigateComparison={(pid) => {
+          applyPair(pid)
+          navigate('comparison')
+          setActiveSignal(null)
+        }}
+      />
 
-      <Modal open={!!activeInsight} onClose={() => setActiveInsightId(null)} title={activeInsight?.title ?? ''} subtitle={activeInsight ? `${activeInsight.category} · ${activeInsight.date} · Illustrative content` : ''}>
+      <Modal open={!!activeInsight} onClose={() => setActiveInsightId(null)} title={activeInsight?.title ?? ''} subtitle={activeInsight ? `${activeInsight.category} · ${activeInsight.date} · Educational content` : ''}>
         {activeInsight && (
           <div className="space-y-3">
             <p className="text-[13px] text-text leading-relaxed font-medium">{activeInsight.summary}</p>
@@ -169,11 +151,27 @@ export default function App() {
               ))}
             </ul>
             <div className="bg-appBg border border-border rounded-lg p-3 text-[11px] text-muted leading-relaxed">
-              Educational content for the Hack in Hills '26 demo. Not investment advice.
+              Educational content. It is not current market data and not investment advice.
             </div>
           </div>
         )}
       </Modal>
     </div>
   )
+
+  function applyPair(pid: string) {
+    const [l, r] = pid.split('-')
+    if (isSymbol(l)) setCompareLeft(l as ContractSymbol)
+    if (isSymbol(r)) setCompareRight(r as ContractSymbol)
+  }
+}
+
+function isSymbol(s: string): s is ContractSymbol {
+  return ['GOLDM', 'GOLDTEN', 'GOLDGUINEA', 'GOLDPETAL'].includes(s)
+}
+
+function viewIdSafe(v: string): ViewId | null {
+  const allowed: ViewId[] = ['dashboard', 'signals', 'contracts', 'comparison', 'model', 'insights', 'learn', 'backtest', 'events']
+  const map: Record<string, ViewId> = { backtest: 'backtest', events: 'backtest' }
+  return allowed.includes(v as ViewId) ? (v as ViewId) : (map[v] ?? null)
 }

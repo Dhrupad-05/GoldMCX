@@ -18,11 +18,11 @@ in-process latest-quote store plus the persisted tables.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
 import threading
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,7 +30,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.locking import lock_key
 from app.models.live import LiveQuoteEvent, ProviderSession
 from app.providers import base as pb
 from app.providers.truedata import TrueDataProvider
@@ -92,6 +91,12 @@ class FeedWorker(threading.Thread):
         self._errors = 0
         self.provider: pb.MarketDataProvider | None = None
         self.session_factory = None  # bound lazily
+        # Leadership lease: a dedicated connection holds a SESSION-scoped
+        # advisory lock for the entire worker lifetime. (A transaction-scoped
+        # lock is released the moment its session closes, so the worker must
+        # keep this connection open until shutdown.)
+        self._leader_conn = None
+        self._leader_digest: int | None = None
 
     # -------------------------------------------------------------- lifecycle
     def run(self) -> None:
@@ -111,26 +116,58 @@ class FeedWorker(threading.Thread):
         self.session_factory = factory
         # Leadership lease: only one feed worker may hold the subscription for
         # its provider account (documented one-session limits).
-        db = factory()
+        if engine.dialect.name == "postgresql" and not self._acquire_leader_lease(engine):
+            logger.error("another feed worker holds the leader lease; exiting")
+            return
         try:
-            from app.db.locking import _stub_held  # noqa: F401  (documented helper import)
-
-            from sqlalchemy import text
-
-            if engine.dialect.name == "postgresql":
-                digest = int.from_bytes(
-                    __import__("hashlib").blake2b(
-                        lock_key("dataset", f"feed-{self.provider_name}").encode(), digest_size=8
-                    ).digest(), "big"
-                )
-                got = db.execute(
-                    text("SELECT pg_advisory_xact_lock(:key)"), {"key": digest}
-                ).scalar_one_or_none()
-                if not got:
-                    logger.error("another feed worker holds the leader lease; exiting")
-                    return
+            self._run_locked(factory)
         finally:
-            db.close()
+            self._release_leader_lease()
+            self._record_session(factory, "disconnected")
+
+    def _acquire_leader_lease(self, engine) -> bool:
+        """Hold a session-level advisory lock on a connection kept open until stop.
+
+        pg_try_advisory_lock returns a real boolean; the lock survives
+        transactions and lives exactly as long as this dedicated connection.
+        """
+        from sqlalchemy import text
+
+        digest = int.from_bytes(
+            hashlib.blake2b(
+                f"feed-worker:{self.provider_name}".encode(), digest_size=8
+            ).digest(), "big"
+        )
+        self._leader_digest = digest
+        conn = engine.connect()
+        try:
+            got = conn.execute(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": digest}
+            ).scalar_one()
+        except Exception:
+            conn.close()
+            raise
+        self._leader_conn = conn if got else (conn.close() or None)
+        return bool(got)
+
+    def _release_leader_lease(self) -> None:
+        from sqlalchemy import text
+
+        if self._leader_conn is None:
+            return
+        try:
+            if self._leader_digest is not None:
+                self._leader_conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": self._leader_digest}
+                )
+        except Exception:  # noqa: BLE001 - connection close releases it anyway
+            logger.warning("leader-lease unlock failed; closing connection releases the lock")
+        finally:
+            self._leader_conn.close()
+            self._leader_conn = None
+            self._leader_digest = None
+
+    def _run_locked(self, factory) -> None:
         from app.providers.accelpix import AccelPixProvider
 
         self.provider = (
@@ -138,7 +175,6 @@ class FeedWorker(threading.Thread):
         )
         self._record_session(factory, "connecting")
         self._run_evenloop(factory)
-        self._record_session(factory, "disconnected")
 
     def stop(self) -> None:
         self._stop.set()
@@ -314,6 +350,84 @@ def verified_provider_symbol_row(db: Session, provider: str, canonical: str) -> 
 
 # --------------------------------------------------------------------------- parsers
 
+def _first_key(values: dict, keys) -> Any:
+    """Case-insensitive lookup across documented key spellings."""
+    lowered = {k.lower(): v for k, v in values.items()}
+    for key in keys:
+        if key in lowered:
+            return lowered[key]
+    return None
+
+
+def _parse_provider_time(value: Any, received_at: datetime) -> datetime:
+    """Preserve the provider's own event timestamp when it supplies one.
+
+    Supported wire formats: epoch seconds, epoch milliseconds, ISO-8601, and
+    TrueData-session stamps like ``02JUN2025 15:30:02`` (Asia/Kolkata). When
+    the provider supplies NO timestamp the receive time is used and the event
+    is flagged RECEIVE_DERIVED_TIME — freshness claims stay honest.
+    """
+    if value in (None, ""):
+        return received_at
+    if isinstance(value, (int, float)):
+        ts = value / 1000.0 if value > 1e12 else float(value)
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return received_at
+    text = str(value).strip()
+    for fmt in (
+        "%d%b%Y %H:%M:%S", "%d%b%Y%H:%M:%S", "%d %b %Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S",
+    ):
+        try:
+            from zoneinfo import ZoneInfo
+
+            naive = datetime.strptime(text, fmt)
+            return naive.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+        except ValueError:
+            continue
+    try:
+        from datetime import datetime as _dt
+
+        parsed = _dt.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            from zoneinfo import ZoneInfo
+
+            parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return received_at
+
+
+def _canonical_from_provider_symbol(psym: str) -> str | None:
+    up = psym.upper()
+    for canonical in ("GOLDM", "GOLDTEN", "GOLDGUINEA", "GOLDPETAL"):
+        if up.startswith(canonical):
+            return canonical
+    return None
+
+
+def _quote_dedup_key(event: pb.QuoteEvent) -> str:
+    """Deterministic fingerprint: identical source events collapse to one row.
+
+    Re-persisting an unchanged latest-quote snapshot must never mint a fresh
+    random key; the same (provider, symbol, event time, prices) tuple maps to
+    the same key, backed by a database unique constraint.
+    """
+    basis = "|".join([
+        event.provider,
+        event.provider_symbol,
+        event.event_time.isoformat() if event.event_time.tzinfo
+        else event.event_time.isoformat() + "+00:00",
+        str(event.last_price),
+        str(event.bid),
+        str(event.ask),
+        str(event.volume),
+        str(event.open_interest),
+    ])
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:48]
+
 def _parse_truedata_message(message: Any) -> pb.QuoteEvent | None:
     """Validate a documented TrueData live message into a typed QuoteEvent.
 
@@ -326,39 +440,53 @@ def _parse_truedata_message(message: Any) -> pb.QuoteEvent | None:
         if text.startswith("heartbeat") or not text.strip():
             return None
         data = json.loads(text) if text.lstrip().startswith("[") or text.lstrip().startswith("{") else None
-        if isinstance(data, str) is False and data is not None:
-            pass
     except Exception:  # noqa: BLE001
         return None
     symbol = None
-    values = []
-    if isinstance(data, dict) and "symbol" in data:
-        symbol = data.get("symbol")
+    values: dict = {}
+    if isinstance(data, dict):
+        # Documented JSON quote objects carry the symbol + quote fields plus a
+        # server event time/sequence. Keys vary by case; match case-insensitively.
+        symbol = _first_key(data, ("symbol", "sym", "tkr"))
+        if symbol is None:
+            return None
         values = data
     elif isinstance(data, list) and len(data) >= 3:
+        # Documented positional wire format: symbol, ltp, vol, bid, ask, ...
         symbol = data[0]
-        values = {"ltp": data[1], "vol": data[2]}
+        values = {
+            "ltp": data[1], "vol": data[2],
+            **({"bid": data[3] if len(data) > 3 else None}),
+            **({"ask": data[4] if len(data) > 4 else None}),
+            **({"time": data[-1] if len(data) > 5 else None}),
+        }
     else:
         return None
+    ltp = _first_key(values, ("ltp", "price", "lastprice", "last"))
+    try:
+        price = float(ltp) if ltp not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    raw_time = _first_key(values, ("time", "timestamp", "ltt", "quotetimestamp", "ts"))
+    received_at = datetime.now(timezone.utc)
+    event_time = _parse_provider_time(raw_time, received_at)
     from app.services.instrument_map import provider_symbol_for
 
     canonical = _canonical_from_provider_symbol(str(symbol))
     if canonical is None:
         return None
-    ltp = values.get("ltp") or values.get("price")
-    try:
-        price = float(ltp) if ltp not in (None, "") else None
-    except (TypeError, ValueError):
-        return None
     return pb.QuoteEvent(
         canonical_symbol=canonical,
         provider_symbol=str(symbol),
         provider="truedata",
-        event_time=datetime.now(timezone.utc),
-        receive_time=datetime.now(timezone.utc),
+        event_time=event_time,
+        receive_time=received_at,
         last_price=price,
-        volume=values.get("vol"),
-        data_status="VERIFIED",
+        bid=_num(values, ("bid", "bp")) if isinstance(values.get("bid"), (int, float)) else None,
+        ask=_num(values, ("ask", "ap")) if isinstance(values.get("ask"), (int, float)) else None,
+        volume=_num(values, ("vol", "volume")),
+        dedup_key=None,
+        data_status=("VERIFIED" if raw_time not in (None, "") else "RECEIVE_DERIVED_TIME"),
     )
 
 
@@ -367,18 +495,21 @@ def _q_from_accelpix(q: dict, tickers: dict[str, str], now: datetime) -> pb.Quot
     canonical = next((c for c, p in tickers.items() if p == tkr), None)
     if canonical is None:
         return None
+    received_at = now
+    raw_time = _first_key(q, ("tm", "time", "ltt", "ts", "dt"))
+    event_time = _parse_provider_time(raw_time, received_at)
     return pb.QuoteEvent(
         canonical_symbol=canonical,
         provider_symbol=tkr,
         provider="accelpix",
-        event_time=now,
-        receive_time=now,
+        event_time=event_time,
+        receive_time=received_at,
         last_price=_num(q, ("pr", "price")),
         bid=_num(q, ("bp",)),
         ask=_num(q, ("ap",)),
         volume=_num(q, ("vol",)),
         open_interest=_num(q, ("oi",)),
-        data_status="VERIFIED",
+        data_status=("VERIFIED" if raw_time not in (None, "") else "RECEIVE_DERIVED_TIME"),
         payload=q,
     )
 
@@ -402,11 +533,32 @@ def _canonical_from_provider_symbol(psym: str) -> str | None:
     return None
 
 
-def _batch_persist_quotes(db: Session, events: list[pb.QuoteEvent]) -> None:
-    """Batch-write validated quotes; provider event time is the source of truth."""
-    import uuid
+def _batch_persist_quotes(db: Session, events: list[pb.QuoteEvent]) -> int:
+    """Persist only NEW validated quote events; source time is authoritative.
 
-    for e in events[:200]:  # bounded batch size
+    Each event gets a deterministic fingerprint; events already persisted
+    (same (provider, dedup_key) row) are skipped, so re-persisting an
+    unchanged latest-quote snapshot writes nothing. Returns rows inserted.
+    """
+    if not events:
+        return 0
+    batch = events[:200]  # bounded batch size
+    with_keys = []
+    for e in batch:
+        e.dedup_key = e.dedup_key or _quote_dedup_key(e)
+        with_keys.append(e)
+    existing = set(
+        db.execute(
+            select(LiveQuoteEvent.dedup_key).where(
+                LiveQuoteEvent.provider == batch[0].provider,
+                LiveQuoteEvent.dedup_key.in_([e.dedup_key for e in with_keys]),
+            )
+        ).scalars().all()
+    )
+    inserted = 0
+    for e in with_keys:
+        if e.dedup_key in existing:
+            continue
         db.add(LiveQuoteEvent(
             provider=e.provider,
             canonical_symbol=e.canonical_symbol,
@@ -420,8 +572,11 @@ def _batch_persist_quotes(db: Session, events: list[pb.QuoteEvent]) -> None:
             open_interest=e.open_interest,
             data_status=e.data_status,
             payload=e.payload,
-            dedup_key=e.dedup_key or uuid.uuid4().hex[:32],
+            dedup_key=e.dedup_key,
         ))
+        existing.add(e.dedup_key)
+        inserted += 1
+    return inserted
 
 
 def start_worker(provider_name: str | None = None) -> FeedWorker | None:

@@ -70,6 +70,8 @@ class LiveQuoteEvent(Base):
     dedup_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
 
     __table_args__ = (
+        # DB-enforced idempotency: one persisted row per source event fingerprint.
+        UniqueConstraint("provider", "dedup_key", name="uq_live_quote_events_dedup"),
         Index("ix_live_quote_events_provider_time", "provider", "event_time"),
         Index("ix_live_quote_events_symbol_time", "canonical_symbol", "event_time"),
     )

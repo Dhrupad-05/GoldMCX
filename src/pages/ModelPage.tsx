@@ -1,381 +1,300 @@
 import { useMemo, useState } from 'react'
 import {
   BrainCircuit,
-  Play,
   CheckCircle2,
   XCircle,
   AlertTriangle,
   Info,
   ShieldCheck,
-  IndianRupee,
   History as HistoryIcon,
   Scale,
+  RefreshCw,
 } from 'lucide-react'
 import { Panel } from '../components/Panel'
 import { StatusBadge, statusTone } from '../components/StatusBadge'
-import { trainingForPair } from '../data/noveltyTraining'
-import { TEST_OBSERVATIONS } from '../data/testObservations'
-import { ALL_PAIRS, CONTRACT_MAP } from '../data/contracts'
-import { scoreObservation, classifyDisposition, type ScoreResult } from '../lib/anomalyScore'
-import { pairLabel } from '../lib/filters'
-import type { NoveltyObservation } from '../types'
+import { DataState } from '../components/DataState'
+import { api, pairLabel } from '../lib/api'
+import type { MlAnomaly } from '../lib/api'
+import { useApi } from '../lib/useApi'
+import { fmtZ } from '../lib/demoUtil'
+
+const CANONICAL_PAIRS = [
+  'GOLDM-GOLDTEN',
+  'GOLDM-GOLDGUINEA',
+  'GOLDM-GOLDPETAL',
+  'GOLDTEN-GOLDGUINEA',
+  'GOLDTEN-GOLDPETAL',
+  'GOLDGUINEA-GOLDPETAL',
+]
 
 export function ModelPage() {
   const [pairId, setPairId] = useState('GOLDM-GOLDTEN')
-  const [obsId, setObsId] = useState('OBS-01')
-  const [trainedPair, setTrainedPair] = useState<string | null>(null)
-  const [trainedStats, setTrainedStats] = useState<{ n: number; median: number; mad: number; note: string } | null>(null)
+  const status = useApi(() => api.mlStatus('daily'), [])
+  const runs = useApi(() => api.mlJobRuns(), [])
+  const anomalies = useApi(() => api.latestAnomalies(pairId, 40), [pairId])
+  const [adminMsg, setAdminMsg] = useState<string | null>(null)
 
-  const pairObs = useMemo(() => TEST_OBSERVATIONS.filter((o) => o.pairId === pairId), [pairId])
-  const selectedObs = pairObs.find((o) => o.id === obsId) ?? pairObs[0]
-  const training = useMemo(() => trainingForPair(pairId), [pairId])
+  const anomaliesForPair = useMemo(
+    () => (anomalies.data?.anomalies ?? []),
+    [anomalies.data],
+  )
 
-  const result: ScoreResult | null = useMemo(() => {
-    if (!selectedObs || !trainedPair || trainedPair !== pairId) return null
-    const spreads = training.filter((o) => o.id !== selectedObs.id).map((o) => o.spreadPct)
-    return scoreObservation(selectedObs, spreads)
-  }, [selectedObs, trainedPair, pairId, training])
-
-  const calibrate = () => {
-    const spreads = training.map((o) => o.spreadPct)
-    const r = scoreObservation(training[0], spreads) // median/MAD computed on full training sample
-    setTrainedPair(pairId)
-    setTrainedStats({ n: r.stats.n, median: r.stats.median, mad: r.stats.mad, note: r.stats.fallNote })
+  const queueRetrain = async () => {
+    const token = window.prompt('Administrator token (x-admin-token) — required to queue a server-side retrain job:')
+    if (!token) return
+    try {
+      await api.triggerDailyJob(token)
+      setAdminMsg('Retrain/daily job queued server-side. Check the jobs table below for status.')
+      void runs.refresh()
+    } catch (e) {
+      setAdminMsg(`Job could not be queued: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
-  const disposition = useMemo(() => {
-    if (!result) return null
-    const liquidityOk = selectedObs.volumeRatio > 0.6 && selectedObs.openInterestRatio > 0.6
-    const expiryOk = selectedObs.daysToExpiry > 10
-    const costOk = Math.abs(result.robustZ) < 5
-    const convergenceOk = selectedObs.daysToExpiry > 12
-    return classifyDisposition(result.isAnomaly, liquidityOk, expiryOk, costOk, convergenceOk)
-  }, [result, selectedObs])
-
-  const liquidityOk = selectedObs ? selectedObs.volumeRatio > 0.6 && selectedObs.openInterestRatio > 0.6 : false
-  const expiryOk = selectedObs ? selectedObs.daysToExpiry > 10 : false
-  const costOk = result ? Math.abs(result.robustZ) < 5 : false
+  const s = status.data
 
   return (
     <div className="space-y-4">
       {/* Header strip */}
       <div className="bg-card border border-border rounded-xl p-4 flex flex-wrap items-center gap-3 shadow-panel">
         <span className="w-9 h-9 rounded-lg bg-maroon text-warmwhite flex items-center justify-center"><BrainCircuit size={17} /></span>
-        <div>
-          <h2 className="text-[15px] font-extrabold text-text" style={{ fontFamily: 'Georgia, serif' }}>Novelty Detection — Normality Learning</h2>
-          <p className="text-[11.5px] text-muted">Train on mostly-normal observations → learn the normal region → score a new, unseen observation. Robust statistical baseline (median + MAD), not an Isolation Forest.</p>
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-extrabold text-text" style={{ fontFamily: 'Georgia, serif' }}>Model Registry</h2>
+          <p className="text-[11.5px] text-muted">Active artifact, readiness and scored observations — served by FastAPI, never trained in the browser.</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <select
             value={pairId}
-            onChange={(e) => {
-              setPairId(e.target.value)
-              setObsId(TEST_OBSERVATIONS.find((o) => o.pairId === e.target.value)!.id)
-            }}
+            onChange={(e) => setPairId(e.target.value)}
             className="bg-card border border-border rounded-lg px-3 py-2 text-[12px] font-bold text-maroon outline-none"
           >
-            {ALL_PAIRS.map((p) => (
-              <option key={p.pairId} value={p.pairId}>{pairLabel(p.pairId)}</option>
+            {CANONICAL_PAIRS.map((p) => (
+              <option key={p} value={p}>{pairLabel(p)}</option>
             ))}
           </select>
+          <button
+            onClick={() => void queueRetrain()}
+            className="flex items-center gap-1.5 bg-maroon hover:bg-deep text-warmwhite font-bold text-[11.5px] px-3 py-2 rounded-lg"
+          >
+            <RefreshCw size={12} /> Queue retrain (admin)
+          </button>
         </div>
       </div>
+      {adminMsg && (
+        <div className="bg-[#B87928]/10 border border-[#B87928]/25 rounded-xl px-4 py-2.5 text-[12px] text-[#8F5D1D]">
+          {adminMsg}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        {/* 1. Training panel */}
-        <Panel
-          title="1 · Normality-learning panel"
-          subtitle="Calibration data: mostly-normal cross-contract behaviour"
-          icon={<ShieldCheck size={15} />}
-        >
-          <div className="grid grid-cols-3 gap-2 mb-3">
-            {[
-              ['Training size', trainedStats ? `${trainedStats.n} obs` : '—'],
-              ['Training period', 'Aug 4 – Oct 8, 2026'],
-              ['Mostly-normal share', '~94% normal'],
-            ].map(([k, v]) => (
-              <div key={k} className="bg-appBg border border-border rounded-lg p-2.5 text-center">
-                <p className="text-[9px] uppercase tracking-wide text-muted font-semibold">{k}</p>
-                <p className="text-[13px] font-extrabold text-text mt-0.5">{v}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Distribution visual */}
-          <FeatureSpace
-            training={training.map((o) => o.spreadPct)}
-            newPoint={trainedPair === pairId && selectedObs ? selectedObs.spreadPct : null}
-            isAnomaly={result?.isAnomaly ?? false}
-            showNew={!!result}
-          />
-
-          <div className="flex items-center gap-3 mt-3">
-            <button
-              onClick={calibrate}
-              className="flex items-center gap-2 bg-maroon hover:bg-deep text-warmwhite font-bold text-[12.5px] px-4 py-2.5 rounded-lg transition-colors"
-            >
-              <Play size={13} /> {trainedPair === pairId ? 'Re-learn normal behaviour' : 'Learn Normal Behaviour'}
-            </button>
-            {trainedStats && (
-              <StatusBadge tone={trainedPair === pairId ? 'green' : 'amber'} dot>
-                {trainedPair === pairId ? 'Calibrated for this pair' : 'Calibration stale — pair changed'}
-              </StatusBadge>
-            )}
-          </div>
-
-          {trainedStats && (
-            <div className="mt-3 bg-appBg border border-border rounded-lg p-3 text-[11.5px] leading-relaxed">
-              <p><strong>Learned statistics (computed locally, not stored):</strong></p>
-              <p className="mt-1 text-muted">
-                Training median <strong className="text-text">{trainedStats.median.toFixed(3)}%</strong> · robust scale (MAD) <strong className="text-text">{trainedStats.mad.toFixed(3)}</strong> · n = {trainedStats.n}. {trainedStats.note}
-              </p>
-            </div>
-          )}
-        </Panel>
-
-        {/* 2. New observation panel */}
-        <Panel
-          title="2 · New-observation panel"
-          subtitle="Held-out scenarios — excluded from training statistics before scoring"
-          icon={<AlertTriangle size={15} />}
-        >
-          <div className="grid grid-cols-2 gap-2">
-            {pairObs.map((o) => (
-              <button
-                key={o.id}
-                onClick={() => setObsId(o.id)}
-                className={`rounded-lg border p-2.5 text-left transition-all ${
-                  selectedObs?.id === o.id
-                    ? 'border-maroon bg-maroon/5 ring-1 ring-maroon/30'
-                    : 'border-border bg-appBg hover:bg-warmwhite'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <p className="text-[11.5px] font-bold text-text leading-tight">{o.scenarioLabel}</p>
-                  <StatusBadge tone={o.expectedHint === 'normal' ? 'green' : 'red'}>
-                    {o.expectedHint === 'normal' ? 'normal' : 'unusual'}
-                  </StatusBadge>
-                </div>
-                <p className="text-[10px] text-muted mt-1">spread {o.spreadPct.toFixed(2)}% · vol ×{o.volumeRatio.toFixed(2)}</p>
-              </button>
-            ))}
-          </div>
-
-          {selectedObs && (
-            <div className="mt-3 bg-appBg border border-border rounded-lg p-3">
-              <p className="text-[12px] font-bold text-text">{selectedObs.scenarioLabel}</p>
-              <p className="text-[11.5px] text-muted mt-1 leading-relaxed">{selectedObs.narrative}</p>
-              <div className="grid grid-cols-4 gap-2 mt-2.5">
+        {/* 1. Model status */}
+        <Panel title="Active daily model" subtitle="Registered via the backend model registry" icon={<ShieldCheck size={15} />}>
+          <DataState loading={status.loading} error={status.error} retry={status.refresh} />
+          {s && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
                 {[
-                  ['Spread', `${selectedObs.spreadPct.toFixed(2)}%`],
-                  ['Vol ratio', `×${selectedObs.volumeRatio.toFixed(2)}`],
-                  ['OI ratio', `×${selectedObs.openInterestRatio.toFixed(2)}`],
-                  ['Expiry', `${selectedObs.daysToExpiry} d`],
+                  ['Status', s.status],
+                  ['Model version', s.model_version ?? 'none'],
+                  ['Mode', s.mode],
                 ].map(([k, v]) => (
-                  <div key={k} className="bg-card border border-border rounded-md px-2 py-1.5 text-center">
-                    <p className="text-[8.5px] uppercase font-semibold text-muted">{k}</p>
-                    <p className="text-[11.5px] font-bold text-text">{v}</p>
+                  <div key={k} className="bg-appBg border border-border rounded-lg p-2.5 text-center">
+                    <p className="text-[9px] uppercase tracking-wide text-muted font-semibold">{k}</p>
+                    <p className="text-[12.5px] font-extrabold text-text mt-0.5 truncate">{v}</p>
                   </div>
                 ))}
               </div>
+              {s.status !== 'READY' && (
+                <div className="bg-[#B87928]/10 border border-[#B87928]/25 rounded-lg p-3 text-[11.5px] text-[#8F5D1D] leading-relaxed">
+                  <p className="flex items-start gap-1.5 font-bold"><Info size={13} className="mt-0.5 shrink-0" /> ML_MODEL_NOT_READY</p>
+                  <p className="mt-1">{s.notes}</p>
+                  <p className="mt-1">Run <code className="text-[10.5px] bg-white/60 px-1 rounded">python -m ml.train_model --sync-history --mode all</code> from the backend environment once verified history is stored.</p>
+                </div>
+              )}
+              {s.status === 'READY' && (
+                <div className="bg-appBg border border-border rounded-lg p-3 text-[11.5px] leading-relaxed">
+                  <p><strong>Algorithm:</strong> {s.algorithm}</p>
+                  <p className="mt-1 text-muted">
+                    <strong>Features ({s.feature_names?.length ?? 0}):</strong>{' '}
+                    {s.feature_names?.slice(0, 8).join(', ')}
+                    {(s.feature_names?.length ?? 0) > 8 ? ', …' : ''}
+                  </p>
+                  {s.artifact_sha256 && (
+                    <p className="mt-1 text-muted break-all">SHA-256: {s.artifact_sha256.slice(0, 24)}…</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </Panel>
+
+        {/* 2. Registry history */}
+        <Panel title="Registry history" subtitle="candidate → active → retired lifecycle" icon={<HistoryIcon size={15} />}>
+          <DataState loading={status.loading} error={status.error} retry={status.refresh} />
+          {s && (s.registry?.length > 0 ? (
+            <div className="overflow-x-auto thin-scroll">
+              <table className="w-full text-left mt-1">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-muted border-b border-border">
+                    <th className="py-2 pr-3">Version</th>
+                    <th className="py-2 pr-3">Status</th>
+                    <th className="py-2 pr-3 hidden sm:table-cell">Algorithm</th>
+                    <th className="py-2">Activated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {s.registry.map((r) => (
+                    <tr key={r.model_version} className="border-b border-border/40">
+                      <td className="py-2 pr-3 text-[12px] font-semibold text-text">{r.model_version}</td>
+                      <td className="py-2 pr-3"><StatusBadge tone={r.status === 'active' ? 'green' : r.status === 'failed' ? 'red' : 'neutral'} dot>{r.status}</StatusBadge></td>
+                      <td className="py-2 pr-3 text-[11.5px] text-muted hidden sm:table-cell">{r.algorithm}</td>
+                      <td className="py-2 text-[11.5px] text-muted">{r.activated_at ? r.activated_at.slice(0, 10) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-[12px] text-muted py-6 text-center">
+              No artifacts registered yet. The registry fills after the first successful training run.
+            </p>
+          ))}
+        </Panel>
       </div>
 
-      {/* 3. Result panel */}
+      {/* 3. Scored observations */}
       <Panel
-        title="3 · Statistical anomaly score"
-        subtitle="Modified z-score: M = 0.6745 × (x − median) / MAD — screening threshold |M| ≥ 3.5"
+        title={`Scored observations — ${pairLabel(pairId)}`}
+        subtitle="Real feature scores persisted by the daily job"
         icon={<Scale size={15} />}
       >
-        {!result ? (
+        <DataState loading={anomalies.loading} error={anomalies.error} retry={anomalies.refresh} />
+        {!anomalies.loading && !anomalies.error && (anomaliesForPair.length === 0 ? (
           <div className="py-10 text-center">
             <BrainCircuit size={30} className="mx-auto text-muted/40" />
-            <p className="text-[13px] font-bold text-text mt-3">Calibration required before scoring</p>
+            <p className="text-[13px] font-bold text-text mt-3">No scored observations for this pair yet</p>
             <p className="text-[11.5px] text-muted mt-1 max-w-md mx-auto leading-relaxed">
-              Click <strong>&ldquo;Learn Normal Behaviour&rdquo;</strong> to compute the training distribution first — the held-out observation is excluded from its own training statistics.
+              The daily job scores real pair observations after official EOD data is ingested. The browser never fabricates training or scoring.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,4fr)] gap-5">
-            <div>
-              <div className="grid grid-cols-4 gap-2">
-                {[
-                  ['New observation', `${selectedObs!.spreadPct.toFixed(2)}%`],
-                  ['Training median', `${result.stats.median.toFixed(2)}%`],
-                  ['MAD (scale)', result.stats.mad.toFixed(3)],
-                  ['Modified z', result.robustZ.toFixed(2)],
-                ].map(([k, v]) => (
-                  <div key={k} className="bg-appBg border border-border rounded-lg p-2.5 text-center">
-                    <p className="text-[9px] uppercase tracking-wide text-muted font-semibold">{k}</p>
-                    <p className={`text-[14px] font-extrabold mt-0.5 ${k === 'Modified z' ? (result.isAnomaly ? 'text-[#B33838]' : 'text-[#2E6447]') : 'text-text'}`}>{v}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div className={`mt-3 rounded-xl border p-4 ${
-                result.isAnomaly ? 'bg-[#B33838]/8 border-[#B33838]/30' : 'bg-[#3F8061]/8 border-[#3F8061]/30'
-              }`}>
-                <div className="flex items-center gap-2">
-                  {result.isAnomaly
-                    ? <XCircle size={18} className="text-[#B33838]" />
-                    : <CheckCircle2 size={18} className="text-[#2E6447]" />}
-                  <p className={`text-[14px] font-extrabold ${result.isAnomaly ? 'text-[#8C2B2B]' : 'text-[#2E6447]'}`}>
-                    {result.isAnomaly ? 'ANOMALOUS' : 'NORMAL'}
-                  </p>
-                  <StatusBadge tone={statusTone(result.severity)}>{result.severity}</StatusBadge>
-                  <span className="ml-auto text-[11px] font-semibold text-muted">severity score {result.score.toFixed(2)} / 1.00</span>
-                </div>
-                <p className="text-[12px] text-text leading-relaxed mt-2">{result.explanation}</p>
-              </div>
-
-              {/* Severity meter */}
-              <div className="mt-3">
-                <div className="flex items-center justify-between text-[10px] text-muted mb-1">
-                  <span>0 — normal</span>
-                  <span>0.58 — threshold (|z| 3.5)</span>
-                  <span>1.00 — max</span>
-                </div>
-                <div className="h-2.5 rounded-full bg-appBg border border-border overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{ width: `${result.score * 100}%`, background: result.isAnomaly ? '#B33838' : '#3F8061' }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* 4. Validation + explanation */}
-            <div className="space-y-3">
-              <div className="bg-appBg border border-border rounded-xl p-3.5">
-                <p className="text-[12px] font-bold text-text mb-2">Post-detection validation</p>
-                <div className="space-y-1.5">
-                  <CheckRow ok={liquidityOk} label="Liquidity" detail={liquidityOk ? 'Flow ratios inside acceptable range' : 'Thin-book signature — volume/OI collapsed'} />
-                  <CheckRow ok={expiryOk} label="Contract expiry" detail={expiryOk ? `${selectedObs!.daysToExpiry} days to expiry — outside distortion window` : `Only ${selectedObs!.daysToExpiry} days to expiry — settlement mechanics likely`} />
-                  <CheckRow ok={costOk} label="Transaction-cost assumption" detail={costOk ? 'Illustrative cost model leaves residual edge in scenario' : 'Extreme excursion — costs likely dominate in scenario'} />
-                  <CheckRow ok={liquidityOk} label="Slippage potential" detail={liquidityOk ? 'Moderate slippage assumed (demo)' : 'High slippage risk on thin leg'} />
-                  <CheckRow ok={convergenceOk(selectedObs!)} label="Historical convergence" detail={convergenceOk(selectedObs!) ? 'Similar scenarios reverted within ~4 sessions (illustrative)' : 'Short window — convergence untestable in scenario'} />
-                </div>
-                {disposition && (
-                  <div className={`mt-3 rounded-lg p-2.5 flex items-center gap-2 ${
-                    disposition === 'Actionable' ? 'bg-[#3F8061]/12 text-[#2E6447]'
-                    : disposition === 'Watch' ? 'bg-[#B87928]/12 text-[#8F5D1D]'
-                    : 'bg-appBg text-muted'
-                  }`}>
-                    <ShieldCheck size={14} />
-                    <p className="text-[12px] font-bold">Final classification: {disposition}</p>
-                    <span className="ml-auto text-[9.5px] text-muted">scenario classification only</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-[#B87928]/8 border border-[#B87928]/25 rounded-xl p-3.5 text-[11.5px] text-[#8F5D1D] leading-relaxed">
-                <p className="flex items-start gap-1.5 font-bold"><Info size={13} className="mt-0.5 shrink-0" /> What this result does and does not mean</p>
-                <p className="mt-1.5">
-                  A high score means the observation is <strong>unusual relative to the calibration sample</strong> under a robust screening rule. It does not prove economic mispricing, guarantee convergence, or imply a profitable trade. Tradability and backtest evidence are separate, unimplemented questions.
-                </p>
-              </div>
+            <ScoreSpace
+              scores={anomaliesForPair.map((a) => a.robust_z)}
+              thresholds={{ normal: 2.5, anomaly: 3.5 }}
+              latest={anomaliesForPair[0]}
+            />
+            <div className="overflow-x-auto thin-scroll">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-muted border-b border-border">
+                    <th className="py-2 pr-3">Date</th>
+                    <th className="py-2 pr-3">z</th>
+                    <th className="py-2 pr-3">Severity</th>
+                    <th className="py-2">Disposition</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {anomaliesForPair.slice(0, 12).map((a) => (
+                    <tr key={a.score_id} className="border-b border-border/40">
+                      <td className="py-2 pr-3 text-[11.5px] text-muted">{a.observation_date}</td>
+                      <td className="py-2 pr-3 text-[12px] font-bold text-maroon">{fmtZ(a.robust_z)}</td>
+                      <td className="py-2 pr-3"><StatusBadge tone={a.is_anomaly ? statusTone(a.severity) : 'green'} dot>{a.is_anomaly ? a.severity : 'Normal'}</StatusBadge></td>
+                      <td className="py-2 text-[11.5px] text-muted">{a.disposition?.disposition ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-        )}
+        ))}
       </Panel>
 
-      {/* Method footer */}
-      <div className="bg-card border border-border rounded-xl p-4 shadow-panel text-[11.5px] text-muted leading-relaxed">
-        <p><strong className="text-text">Method:</strong> robust statistical novelty baseline (median + MAD modified z-score) computed in-browser on {training.length} illustrative mostly-normal observations per pair. Threshold |M| ≥ 3.5 is a configurable screening heuristic. If MAD is near zero, an IQR-based fallback scale is used; a documented floor prevents division by zero. No Isolation Forest, production model, or live MCX data is involved.</p>
+      {/* 4. Job runs */}
+      <Panel title="Job runs (sync → features → scoring)" subtitle="Durable run records from the scheduled daily workflow" icon={<HistoryIcon size={15} />}>
+        <DataState loading={runs.loading} error={runs.error} retry={runs.refresh} />
+        {!runs.loading && !runs.error && ((runs.data?.runs?.length ?? 0) > 0 ? (
+          <div className="overflow-x-auto thin-scroll">
+            <table className="w-full text-left mt-1">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wide text-muted border-b border-border">
+                  <th className="py-2 pr-3">Run</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Started</th>
+                  <th className="py-2 hidden sm:table-cell">Summary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.data!.runs.slice(0, 10).map((r) => (
+                  <tr key={r.run_id} className="border-b border-border/40">
+                    <td className="py-2 pr-3 text-[11px] font-mono text-muted">{r.run_id.slice(0, 8)}</td>
+                    <td className="py-2 pr-3"><StatusBadge tone={r.status === 'succeeded' ? 'green' : r.status === 'running' ? 'amber' : 'red'} dot>{r.status}</StatusBadge></td>
+                    <td className="py-2 pr-3 text-[11.5px] text-muted">{r.started_at.slice(0, 16).replace('T', ' ')}</td>
+                    <td className="py-2 text-[10.5px] text-muted truncate max-w-[280px]">
+                      {r.errors.length > 0 ? r.errors[0] : JSON.stringify(r.summary).slice(0, 90)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-[12px] text-muted py-6 text-center">No job runs recorded yet. The first EOD sync will register one.</p>
+        ))}
+      </Panel>
+
+      <div className="bg-[#B87928]/8 border border-[#B87928]/25 rounded-xl p-3.5 text-[11.5px] text-[#8F5D1D] leading-relaxed">
+        <p className="flex items-start gap-1.5 font-bold"><AlertTriangle size={13} className="mt-0.5 shrink-0" /> What a score does and does not mean</p>
+        <p className="mt-1.5">
+          Anomaly scores measure deviation from the learned normal region for contract-aware relative-value features. They are not probability of profit and not a trading recommendation. Dispositions apply liquidity, expiry and cost checks before anything is presented as actionable.
+        </p>
       </div>
     </div>
   )
 }
 
-function convergenceOk(o: NoveltyObservation): boolean {
-  return o.daysToExpiry > 12
-}
-
-function CheckRow({ ok, label, detail }: { ok: boolean; label: string; detail: string }) {
-  return (
-    <div className="flex items-start gap-2">
-      {ok ? <CheckCircle2 size={14} className="text-[#2E6447] mt-0.5 shrink-0" /> : <XCircle size={14} className="text-[#B33838] mt-0.5 shrink-0" />}
-      <div className="min-w-0">
-        <p className="text-[11.5px] font-bold text-text leading-tight">{label} <span className={`text-[9.5px] font-semibold ${ok ? 'text-[#2E6447]' : 'text-[#8C2B2B]'}`}>· {ok ? 'PASS' : 'FLAG'}</span></p>
-        <p className="text-[10.5px] text-muted leading-snug">{detail}</p>
-      </div>
-    </div>
-  )
-}
-
-/** Schematic feature-space: training histogram + held-out point marker. */
-function FeatureSpace({
-  training,
-  newPoint,
-  isAnomaly,
-  showNew,
+/** Feature-space visual driven by real persisted scores for the pair. */
+function ScoreSpace({
+  scores,
+  thresholds,
+  latest,
 }: {
-  training: number[]
-  newPoint: number | null
-  isAnomaly: boolean
-  showNew: boolean
+  scores: number[]
+  thresholds: { normal: number; anomaly: number }
+  latest: MlAnomaly | null
 }) {
-  const W = 460
-  const H = 130
-  const pad = 26
-  const all = newPoint != null ? [...training, newPoint] : training
-  const min = Math.min(...all)
-  const max = Math.max(...all)
-  const span = max - min || 1
-  const x = (v: number) => pad + ((v - min) / span) * (W - pad * 2)
-
-  // bin the training points
-  const bins = 22
-  const counts = new Array(bins).fill(0)
-  training.forEach((v) => {
-    const b = Math.min(bins - 1, Math.floor(((v - min) / span) * bins))
-    counts[b]++
-  })
-  const maxC = Math.max(...counts, 1)
-
+  const checkOk = latest ? Math.abs(latest.robust_z) < thresholds.anomaly : true
   return (
-    <div className="bg-warmwhite border border-border rounded-lg p-2">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Feature space: training distribution and new observation">
-        {/* learned normal region */}
-        <rect
-          x={x(min + span * 0.18)}
-          width={x(min + span * 0.82) - x(min + span * 0.18)}
-          y={8}
-          height={H - 30}
-          fill="#3F8061"
-          opacity={0.10}
-        />
-        <text x={x(min + span * 0.5)} y={H - 8} textAnchor="middle" fontSize={8.5} fill="#76645B">
-          spread (%) — learned normal region shaded
-        </text>
-        {counts.map((cnt, i) => {
-          const bw = (W - pad * 2) / bins
-          const h = (cnt / maxC) * (H - 45)
+    <div className="bg-warmwhite border border-border rounded-lg p-3">
+      <div className="flex items-center gap-2 mb-2">
+        {checkOk ? <CheckCircle2 size={15} className="text-[#2E6447]" /> : <XCircle size={15} className="text-[#B33838]" />}
+        <p className="text-[12.5px] font-bold text-text">
+          {latest ? `Latest: z ${fmtZ(latest.robust_z)} on ${latest.observation_date}` : 'No observations'}
+        </p>
+        <StatusBadge tone={latest?.is_anomaly ? statusTone(latest.severity) : 'green'} dot>
+          {latest?.is_anomaly ? latest.severity : 'Normal'}
+        </StatusBadge>
+      </div>
+      <div className="space-y-1 h-32 overflow-y-auto thin-scroll pr-1">
+        {scores.map((z, i) => {
+          const anom = Math.abs(z) >= thresholds.anomaly
+          const watch = !anom && Math.abs(z) >= thresholds.normal
           return (
-            <rect
-              key={i}
-              x={pad + i * bw + 1}
-              y={H - 22 - h}
-              width={bw - 2}
-              height={h}
-              rx={1.5}
-              fill="#662023"
-              opacity={0.55}
-            />
+            <div key={i} className="flex items-center gap-2">
+              <div className="h-2 rounded-full flex-1 bg-appBg border border-border/50 overflow-hidden">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${Math.min(100, (Math.abs(z) / 6) * 100)}%`,
+                    background: anom ? '#B33838' : watch ? '#B87928' : '#3F8061',
+                  }}
+                />
+              </div>
+              <span className="text-[9.5px] text-muted w-10 text-right font-mono">{z.toFixed(2)}</span>
+            </div>
           )
         })}
-        {showNew && newPoint != null && (
-          <g>
-            <line x1={x(newPoint)} y1={4} x2={x(newPoint)} y2={H - 22} stroke={isAnomaly ? '#B33838' : '#3F8061'} strokeWidth={1.5} strokeDasharray="3 3" />
-            <circle cx={x(newPoint)} cy={12} r={5} fill={isAnomaly ? '#B33838' : '#3F8061'} stroke="#FFF9F3" strokeWidth={1.5} />
-            <text x={Math.min(W - 60, Math.max(24, x(newPoint)))} y={10} textAnchor="middle" fontSize={8.5} fontWeight={700} fill={isAnomaly ? '#8C2B2B' : '#2E6447'}>
-              NEW
-            </text>
-          </g>
-        )}
-      </svg>
+      </div>
     </div>
   )
 }

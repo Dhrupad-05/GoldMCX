@@ -109,6 +109,9 @@ class CacheLayer:
     redis: Any = None
     degraded: bool = False
     shared: bool = False
+    _local_epoch: int = 1
+
+    EPOCH_KEY: ClassVar[str] = "mcx:dataset_epoch"
 
     @classmethod
     def from_settings(cls) -> "CacheLayer":
@@ -133,9 +136,38 @@ class CacheLayer:
 
     # ---------------- key namespace -----------------------------------
 
+    def current_epoch(self) -> int:
+        """Dataset epoch shared across instances (Redis) or process-local."""
+        if self.redis is not None:
+            try:
+                raw = self.redis.get(self.EPOCH_KEY)
+                return int(raw) if raw else self._local_epoch
+            except Exception:  # noqa: BLE001
+                return self._local_epoch
+        return self._local_epoch
+
+    def bump(self) -> int:
+        """Invalidate every derived read after a successful data commit.
+
+        Must be called ONLY after the database transaction committed; rolled
+        back writes must never publish invalidation.
+        """
+        if self.redis is not None:
+            try:
+                new = self.redis.incr(self.EPOCH_KEY)
+                self._local_epoch = int(new)
+                return self._local_epoch
+            except Exception:  # noqa: BLE001
+                logger.warning("redis epoch bump failed; invalidating locally")
+        self._local_epoch += 1
+        return self._local_epoch
+
     def key(self, endpoint: str, params: dict) -> str:
         basis = endpoint + "|" + json.dumps(params, sort_keys=True, default=str)
-        return f"mcx:{DATASET_VERSION}:{endpoint}:{hashlib.sha256(basis.encode()).hexdigest()[:32]}"
+        return (
+            f"mcx:v{DATASET_VERSION}:e{self.current_epoch()}:"
+            f"{endpoint}:{hashlib.sha256(basis.encode()).hexdigest()[:32]}"
+        )
 
     # ---------------- read/write --------------------------------------
 

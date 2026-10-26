@@ -42,3 +42,11 @@ export function genSeries(
 export const fmtINR = (v: number) => '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: 0 })
 export const fmtPct = (v: number, digits = 1) => `${v > 0 ? '+' : ''}${v.toFixed(digits)}%`
 export const fmtZ = (v: number) => (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2))
+export const fmtDateTime = (iso: string | null | undefined): string => {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
+}
