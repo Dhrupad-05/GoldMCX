@@ -99,6 +99,11 @@ def score(pair_id: str, body: ScoreRequest, session: Session = Depends(get_sessi
     )
     from app.analytics.signals import evaluate_signal
     sig = evaluate_signal(session, row)
+    # The evaluation row is durable in-process (signals.py commits); release any
+    # cached /signals dashboard payload built before it existed.
+    from app.cache import get_cache as _get_cache
+
+    _get_cache().bump()  # committed evaluation row; cached reads refresh on next request
     detail = anomaly_service.score_detail_dict(session, row)
     detail["disposition"] = {
         "status": sig.status,

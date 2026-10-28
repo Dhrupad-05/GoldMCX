@@ -227,6 +227,19 @@ def import_sources(session: Session, file_filter: dict | None = None) -> dict:
         "rejection_reasons": reason_counts,
     }
     _persist_latest_quality_snapshot(session, report)
+    # Derived market tables are part of a complete import: without them every
+    # /contracts, /comparisons and /dashboard read 404s even though raw rows
+    # landed. Committed after the raw rows; failures are reported, not fatal.
+    try:
+        with bind_run_id(run.id):
+            derived = rebuild_market_tables(session)
+        session.commit()
+        report["derived"] = derived
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        report["derived"] = None
+        report["derived_errors"] = [f"rebuild_market_tables failed: {type(exc).__name__}: {exc}"]
+        report["errors"].append(report["derived_errors"][0])
     return report
 
 

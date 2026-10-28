@@ -42,6 +42,11 @@ export function useMarketStream(): MarketStreamState {
   const esRef = useRef<EventSource | null>(null)
   const retryRef = useRef(0)
   const timerRef = useRef<number | null>(null)
+  const lastStatusRef = useRef<string | null>(null)
+  // Only a stream that actually delivered market data resets the backoff:
+  // a connect that ends instantly (e.g. terminal NOT_CONFIGURED) must keep
+  // escalating the delay instead of polling every second.
+  const gotDataRef = useRef(false)
 
   useEffect(() => {
     let disposed = false
@@ -67,7 +72,7 @@ export function useMarketStream(): MarketStreamState {
       esRef.current = es
 
       es.onopen = () => {
-        retryRef.current = 0
+        if (gotDataRef.current) retryRef.current = 0
         setState((s) => ({ ...s, connected: true, error: null }))
       }
 
@@ -79,6 +84,7 @@ export function useMarketStream(): MarketStreamState {
           /* skip malformed frame */
         }
         if (!parsed?.type) return
+        if (parsed.type !== 'status') gotDataRef.current = true
         const at = Date.now()
         setState((s) => {
           const next: MarketStreamState = { ...s, eventTime: at }
@@ -100,9 +106,30 @@ export function useMarketStream(): MarketStreamState {
             case 'anomaly':
               next.latestAnomaly = parsed.payload as MlAnomaly
               break
-            case 'provider-status':
-              next.status = parsed.payload as LiveStatus
+            case 'status':
+            case 'provider-status': {
+              // Backend may send a flat {status, detail} frame (terminal
+              // NOT_CONFIGURED) or a full LiveStatus payload.
+              const p = parsed.payload as Partial<LiveStatus> & {
+                status?: string
+                detail?: string
+              }
+              const state = String(
+                (p as { state?: string }).state ?? p.status ?? 'UNKNOWN',
+              ).toUpperCase()
+              lastStatusRef.current = state
+              next.status = {
+                provider: p.provider ?? next.status?.provider ?? null,
+                state,
+                detail: p.detail ?? next.status?.detail,
+                worker_state: p.worker_state,
+                latest_event_at:
+                  (p as { latest_event_at?: string | null }).latest_event_at ??
+                  next.status?.latest_event_at ??
+                  null,
+              }
               break
+            }
             default:
               break
           }
@@ -114,11 +141,22 @@ export function useMarketStream(): MarketStreamState {
       }
 
       es.onerror = () => {
-        setState((s) => ({ ...s, connected: false, error: 'stream disconnected — retrying' }))
+        const terminal = lastStatusRef.current
+        setState((s) => ({
+          ...s,
+          connected: false,
+          error:
+            terminal === 'NOT_CONFIGURED'
+              ? 'Provider not configured — EOD-only mode (no live feed)'
+              : 'stream disconnected — retrying',
+        }))
         es.close()
         esRef.current = null
         if (disposed) return
-        const delay = Math.min(15000, 1000 * Math.pow(2, retryRef.current++))
+        const noProvider = lastStatusRef.current === 'NOT_CONFIGURED'
+        const delay = noProvider
+          ? 30000 // nothing to poll for until credentials exist: slow, bounded retry
+          : Math.min(15000, 1000 * Math.pow(2, retryRef.current++))
         timerRef.current = window.setTimeout(connect, delay)
       }
     }

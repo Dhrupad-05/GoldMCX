@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -72,6 +73,12 @@ def get_engine():
         url = _resolve_url(requested)
         _engine = create_engine(url, future=True, **_engine_options(url))
         _session_factory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
+        resolved = make_url(url)
+        if resolved.drivername.startswith("sqlite") and settings.app_env in ("development", "test"):            # Local/dev bootstrap only: additively create missing tables.
+            # PostgreSQL is always migrated by `alembic upgrade head` (§SETUP.md).
+            from app.db.migrations import ensure_schema
+
+            ensure_schema(_engine)
     return _engine
 
 

@@ -14,6 +14,15 @@ Safe to rerun after interruption. Steps:
 """
 from __future__ import annotations
 
+# CLI runs from the repo root (`python -m ml.jobs`); make the backend package
+# importable regardless of the caller's working directory.
+import sys as _sys
+from pathlib import Path as _Path
+
+_BACKEND_DIR = _Path(__file__).resolve().parent.parent / "backend"
+if str(_BACKEND_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_BACKEND_DIR))
+
 import logging
 from datetime import datetime, timezone
 
@@ -176,9 +185,38 @@ def _record_job(session: Session, run_id: str, started_at, status: str,
         existing.errors = errors
         session.commit()
         return
-    session.add(IngestionRun(
-        id=run_id, mode="daily_ml_job", parser_version=PARSER_VERSION,
+    session.add(IngestionRun(        id=run_id, mode="daily_ml_job", parser_version=PARSER_VERSION,
         overall_status=status, data_root="ml", counts=summary, errors=errors,
         completed_at=datetime.now(timezone.utc),
     ))
     session.commit()
+
+
+def _daily_job_cli() -> int:
+    """Standalone CLI for the scheduled daily job (cron / Task Scheduler safe)."""
+    import argparse
+    import json
+
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.session import get_engine
+
+    parser = argparse.ArgumentParser(prog="ml.jobs", description="Run the idempotent daily EOD sync/score job.")
+    parser.add_argument("--days", type=int, default=10, help="History sync lookback window in days (default 10).")
+    args = parser.parse_args()
+
+    engine = get_engine()
+    session = sessionmaker(bind=engine)()
+    try:
+        summary = run_daily_job(session, days=args.days)
+        print(json.dumps(summary, indent=2, default=str))
+        return 0 if str(summary.get("status", "")).startswith("completed") else 1
+    finally:
+        session.close()
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_daily_job_cli())
+

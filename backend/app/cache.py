@@ -197,7 +197,11 @@ class CacheLayer:
                 return
             except Exception:  # noqa: BLE001
                 logger.warning("redis write failed; degraded fallback")
-        _local_cache.set(key, value, ttl_eff, data_as_of, cached_at=time.time())
+        # The local entry store expects an ABSOLUTE expiry timestamp, not the
+        # TTL duration: a raw TTL here expires every entry instantly.
+        _local_cache.set(
+            key, value, time.time() + ttl_eff, data_as_of, cached_at=time.time()
+        )
 
     def invalidate(self, *keys: str) -> None:
         if self.redis is not None:

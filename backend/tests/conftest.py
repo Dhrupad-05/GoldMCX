@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
+ROOT_DIR = BACKEND_DIR.parent
+for _p in (str(BACKEND_DIR), str(ROOT_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 os.environ.setdefault("DATABASE_URL_OVERRIDE", "sqlite:///:memory:")
 

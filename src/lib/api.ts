@@ -294,8 +294,27 @@ export const api = {
 
   contracts: () => request<{ contracts: ContractInventoryItem[] }>('/api/v1/contracts'),
 
-  contractSeries: (symbol: string) =>
-    request<SeriesResponse>(`/api/v1/contracts/${encodeURIComponent(symbol)}/series`),
+  contractSeries: async (symbol: string): Promise<SeriesResponse> => {
+    try {
+      return await request<SeriesResponse>(
+        `/api/v1/contracts/${encodeURIComponent(symbol)}/series`,
+      )
+    } catch (e) {
+      // A 404 "No derived price series" is an explicit EMPTY dataset, not a
+      // backend failure: surface it as data_status NO_DATA so pages render the
+      // honest no-data state instead of "backend unavailable".
+      if (e instanceof ApiError && /No derived price series/i.test(e.message)) {
+        return {
+          symbol,
+          derivation_method: 'none',
+          data_status: 'NO_DATA',
+          points: [],
+          spec_versions_applied: [],
+        }
+      }
+      throw e
+    }
+  },
 
   comparison: (pair: string, rangeDays?: number) => {
     const q = new URLSearchParams({ pair })
@@ -365,8 +384,13 @@ export const api = {
 
   liveStatus: () => request<LiveStatus>('/api/v1/market/live/status'),
 
-  liveQuotes: (symbol?: string) =>
-    request<LiveQuote[]>(`/api/v1/market/live/quotes${symbol ? `?symbol=${symbol}` : ''}`),
+  liveQuotes: async (symbol?: string) => {
+    type QuotesPayload = LiveQuote[] | { quotes: LiveQuote[] }
+    const r = await request<QuotesPayload>(
+      `/api/v1/market/live/quotes${symbol ? `?symbol=${symbol}` : ''}`,
+    )
+    return Array.isArray(r) ? r : (r?.quotes ?? [])
+  },
 }
 
 export const SSE_PATH = '/api/v1/market/live/stream'
