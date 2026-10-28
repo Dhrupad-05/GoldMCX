@@ -26,6 +26,12 @@ import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+# CLI runs from the repo root (`python -m ml.train_model`); make the backend
+# package (app.*) importable regardless of the caller's working directory.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 REPORT_DIR = Path(__file__).resolve().parent / "reports"
 

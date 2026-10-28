@@ -55,34 +55,41 @@ _local_stub = threading.local()
 
 
 def _stub_acquire(keys: list[str], timeout_s: float) -> None:
-    """Bounded acquisition: lock contention can never spin forever."""
+    """Bounded acquisition: lock contention can never spin forever.
+
+    Every key in ``keys`` remains pending until IT is actually held; a key
+    must never be silently dropped from the retry loop (that would record a
+    lock acquisition that never happened)."""
     import time
 
     deadline = time.monotonic() + timeout_s
-    held = getattr(_local_stub, "held", [])
+    held = list(getattr(_local_stub, "held", []))
     held_set = set(held)
-    grow = _sort_keys([k for k in keys if k not in held_set])
-    remaining = grow
-    while remaining:
+    pending = _sort_keys([k for k in keys if k not in held_set])
+    acquired_now: list[str] = []
+    while pending:
         with _stub_lock:
-            free = [k for k in remaining if k not in _stub_held]
+            free = [k for k in pending if k not in _stub_held]
             for k in free:
                 _stub_held[k] = _stub_held.get(k, 0) + 1
-        if len(free) == len(remaining):
+                acquired_now.append(k)
+        still_pending = [k for k in pending if k not in set(acquired_now)]
+        if not still_pending:
             break
         if time.monotonic() >= deadline:
             # Release anything already acquired this pass before failing.
             with _stub_lock:
-                for k in free:
+                for k in acquired_now:
                     n = _stub_held.get(k, 0)
                     if n > 1:
                         _stub_held[k] = n - 1
                     else:
                         _stub_held.pop(k, None)
-            raise LockTimeout(f"could not acquire lock(s) {remaining} within {timeout_s:.1f}s")
+            raise LockTimeout(
+                f"could not acquire lock(s) {_sort_keys(still_pending)} within {timeout_s:.1f}s"
+            )
         time.sleep(0.005)
-        remaining = _sort_keys([k for k in remaining if k not in _stub_held])
-    new_held = list(held) + grow
+    new_held = held + acquired_now
     _local_stub.held = new_held
 
 

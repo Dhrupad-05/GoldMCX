@@ -57,8 +57,14 @@ def get_series(
         q = q.where(NormalizedPrice.trade_date <= end)
     rows = session.execute(q).scalars().all()
     if not rows:
-        raise NotFound(
-            f"No derived price series for '{symbol}'. Run ingestion and market rebuild first."
+        # An empty verified-history dataset is an explicit 200 NO_DATA response,
+        # not a failure: the frontend renders the no-data state without a 404.
+        return SeriesResponse(
+            symbol=symbol,
+            derivation_method="none",
+            data_status="NO_DATA",
+            points=[],
+            spec_versions_applied=[],
         )
     return SeriesResponse(
         symbol=symbol,
